@@ -1,0 +1,7 @@
+build/
+mcsim*
+.vscode/
+*.log
+logs
+test*/
+.nfs*
