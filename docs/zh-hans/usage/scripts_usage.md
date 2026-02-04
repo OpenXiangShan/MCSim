@@ -1,14 +1,14 @@
 # scripts使用说明
 
-本文介绍scripts/目录下一些脚本的功能。
+本文介绍`scripts/`目录下一些脚本的功能。
 
 ## **dump_latency.py**
 
-和mcsim的日志模块配合使用，将 记录的中间日志 转化为 **每条trace在每个模块的延迟**，以csv格式导出到指定文件。当开启mcsim的 **DUMP_MODULEWISE_LOG** 选项生成日志后，在项目根目录下，执行`make latency`，即可调用该程序生成csv文件。
+和mcsim的日志模块配合使用，将 记录的中间日志 转化为 **每条trace在每个模块的延迟**，以csv格式导出到指定文件。当开启mcsim的 **`DUMP_MODULEWISE_LOG`** 选项生成日志后，在项目根目录下，执行`make latency`，即可调用该程序生成csv文件。
 
 ## **plot_latency.py**
 
-将 make latency 生成的csv文件输入到 plot_latency.py 中，可以得到**访存的延迟分布图**。
+将 `make latency` 生成的csv文件输入到 `plot_latency.py` 中，可以得到**访存的延迟分布图**。
 
 ## **plot_trace.py**
 

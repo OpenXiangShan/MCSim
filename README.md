@@ -1,30 +1,30 @@
-## 关于
+## About
 
-MCSim是一个针对内存控制器的模拟器，高度参数化，可以模拟各种内存控制器配置，并输出各种性能指标。目前和YuQuan在相同SPEC trace上关键性能指标接近。
+MCSim is a simulator for memory controllers. It is highly parameterized and capable of simulating various memory controller configurations, outputting a range of performance metrics. Its key performance indicators are currently close to those of YuQuan on the same SPEC traces.
 
-## 目录结构
+## Directory Structure
 
 ```
 .
-├── docs/           # 文档目录
-├── include/        # 头文件目录
-│   ├── config.h    # 配置文件，所有模块共用
+├── docs/           # Documentation
+├── include/        # Header files
+│   ├── config.h    # Configuration file (shared by all modules)
 │   └── ...
 ├── Makefile        # Makefile
-├── mc_trace/       # trace目录
-├── scripts/        # 一些实用脚本
-└── src/            # 各模块源码目录
-    ├── main.cc     # 程序入口
+├── mc_trace/       # Traces
+├── scripts/        # Utility scripts
+└── src/            # Source code for modules
+    ├── main.cc     # Program entry point
     └── ...
 ```
 
-## 使用方法
+## Usage
 
-关于安装、编译和运行，请参考[MCSim使用说明](docs/usage/MCSim_usage.md)
+For installation, compilation, and running instructions, please refer to the [MCSim Usage Guide](docs/en/usage/MCSim_usage.md).
 
-## 文档
+## Documentation
 
-更多关于MCSim的说明文档在docs/目录下。
+More documentation about MCSim can be found in the docs/ directory.
 
 ## LICENSE
 
