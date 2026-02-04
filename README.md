@@ -2,6 +2,8 @@
 
 MCSim is a simulator for memory controllers. It is highly parameterized and capable of simulating various memory controller configurations, outputting a range of performance metrics. Its key performance indicators are currently close to those of YuQuan on the same SPEC traces.
 
+中文说明[在此](README.zh-CN.md)。
+
 ## Directory Structure
 
 ```
@@ -24,7 +26,7 @@ For installation, compilation, and running instructions, please refer to the [MC
 
 ## Documentation
 
-More documentation about MCSim can be found in the docs/ directory.
+More documentation about MCSim can be found in the `docs/` directory.
 
 ## LICENSE
 
