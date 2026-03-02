@@ -30,4 +30,4 @@ Copyright © 2020-2026 Institute of Computing Technology, Chinese Academy of Sci
 
 Copyright © 2021-2026 Beijing Institute of Open Source Chip
 
-MCSim is licensed under the [Mulan PSL v2](LICENSE).
+MCSim is licensed under the [Mulan PSL v2](../../../LICENSE.txt).

@@ -20,7 +20,7 @@ MCSim是一个针对内存控制器的模拟器，高度参数化，可以模拟
 
 ## 使用方法
 
-关于安装、编译和运行，请参考[MCSim使用说明](docs/usage/MCSim_usage.md)
+关于安装、编译和运行，请参考[MCSim使用说明](docs/zh-hans/usage/MCSim_usage.md)
 
 ## 文档
 
@@ -32,4 +32,4 @@ Copyright © 2020-2026 Institute of Computing Technology, Chinese Academy of Sci
 
 Copyright © 2021-2026 Beijing Institute of Open Source Chip
 
-MCSim is licensed under [Mulan PSL v2](LICENSE).
+MCSim is licensed under [Mulan PSL v2](LICENSE.txt).
