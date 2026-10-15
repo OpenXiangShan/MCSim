@@ -17,11 +17,48 @@
 #include "AddrMap/AddrMap.h"
 #include "utils/debug.h"
 #include "Scheduler/TransactionSchedule.h"
-#include "AXI2UI/AXI2UI.h" // Add this include to define reorder_buffer
+#include "AXI2UI/AXI2UI.h"
+#include "config.h"
+
+// Helper function to calculate channel from address using XOR mapping
+// channel = bit[6] ^ bit[9] ^ bit[12] ^ ... ^ bit[63]
+// Removed 'inline' to allow linking from other translation units
+int calculate_channel(uint64_t addr)
+{
+    if constexpr (NUM_CHANNELS == 1) {
+        return 0;
+    } else if constexpr (NUM_CHANNELS == 2) {
+        if constexpr (channel_map_mode == ChannelMapMode::BIT_SELECT) {
+            return (addr >> CHANNEL_SELECT_BIT) & 1;
+        } else {
+            int channel = 0;
+            for (int i = CHANNEL_XOR_START_BIT; i <= CHANNEL_XOR_END_BIT; i += CHANNEL_XOR_STEP) {
+                channel ^= (addr >> i) & 1;
+            }
+            return channel;
+        }
+    } else {
+        // For more than 2 channels, extend this logic
+        return 0;
+    }
+}
+
+static uint64_t channel_local_addr(uint64_t addr)
+{
+    if constexpr (NUM_CHANNELS == 2 && channel_map_mode == ChannelMapMode::BIT_SELECT) {
+        const uint64_t lower_mask = (uint64_t{1} << CHANNEL_SELECT_BIT) - 1;
+        return (addr & lower_mask) | ((addr >> 1) & ~lower_mask);
+    }
+    return addr;
+}
 
 MappedAddr linear_to_mapped(uint64_t addr)
 {
     MappedAddr mapped;
+    // Select the external channel, then map the address within that channel.
+    mapped.channel = calculate_channel(addr);
+    addr = channel_local_addr(addr);
+    
     mapped.row = 0;
     // for (int i = 0; i < 15; ++i) {
         // mapped.row |= ((addr >> row_bits[i]) & 1) << (14 - i);

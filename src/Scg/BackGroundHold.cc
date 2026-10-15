@@ -26,7 +26,7 @@ void BackGroundHold::step()
 // state machine
     switch (state) {
         case IDLE:
-            if(pend_ref || pend_zq) {
+            if(ref_pend_count > 0 || pend_zq) {
                 state = BLOCK;
             }
             break;
@@ -43,8 +43,8 @@ void BackGroundHold::step()
         case PRECHARGE:
             pre_timer++;
             if (pre_timer == tRP) {
-                if (pend_ref) {
-                    pend_ref = false;
+                if (ref_pend_count > 0) {
+                    --ref_pend_count;
                     state = REFRESH;
                     rfc_timer = 0;
                 } else if (pend_zq) {
@@ -59,8 +59,11 @@ void BackGroundHold::step()
             break;
         case REFRESH:
             rfc_timer++;
-            if (rfc_timer == tRFC - 8) {   // minus 9 to align with baiyang
-                if (pend_zq) {
+            if (rfc_timer == tRFC) {
+                if (ref_pend_count > 0) {
+                    --ref_pend_count;
+                    rfc_timer = 0;
+                } else if (pend_zq) {
                     pend_zq = false;
                     state = ZQCS;
                     zqcs_timer = 0;
@@ -72,8 +75,8 @@ void BackGroundHold::step()
         case ZQCS:
             zqcs_timer++;
             if (zqcs_timer == tZQCS) {
-                if (pend_ref) {
-                    pend_ref = false;
+                if (ref_pend_count > 0) {
+                    --ref_pend_count;
                     state = REFRESH;
                     rfc_timer = 0;
                 } else {
@@ -89,12 +92,31 @@ void BackGroundHold::step()
 // timer increment
     ref_timer++;
     zq_timer++;
-    if (ref_timer == tREFI - 2) {   // minus 2 to align with baiyang
-        ref_timer = -1;
-        // refresh
-        pend_ref = true;
+    switch (ScgConfig::ref_policy) {
+        case RefreshPolicy::AUTO:
+            if (ref_timer >= tREFI) {
+                ref_timer = 0;
+                ++ref_pend_count;
+            }
+            break;
+
+        case RefreshPolicy::POSTPONED:
+            if (ref_timer >= tREFI * 8) {
+                ref_timer = 0;
+                ref_pend_count += 8;
+            }
+            break;
+
+        case RefreshPolicy::SPECULATIVE:
+            // TODO: speculative refresh
+            break;
+
+        default:
+            break;
     }
+
     if (zq_timer == tZQINTVL) {
+        // zq_timer = 0;
         zq_timer = -1;
         // zqcs
         pend_zq = true;

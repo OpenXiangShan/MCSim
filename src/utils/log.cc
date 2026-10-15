@@ -19,6 +19,20 @@
 
 namespace fs = std::filesystem;
 
+static const char* readback_source_name(CallerType source)
+{
+    switch (source) {
+    case CallerType::SCG:
+        return "scg";
+    case CallerType::CACHE_HIT:
+        return "cache_hit";
+    case CallerType::CACHE_MISS:
+        return "cache_miss";
+    default:
+        return "unknown";
+    }
+}
+
 bool Log::log_disabled()
 {
     return DumpConfig::DUMP_MODULEWISE_LOG == false;
@@ -35,11 +49,13 @@ Log::Log(const std::string& path)
         "axi_in_cycle.txt",
         "filter_in_cycle.txt",
         "addrmap_in_cycle.txt",
+        "cache_in_cycle.txt",
         "scheduler_in_cycle.txt",
-        "scg_in_cycle.txt"
+        "scg_in_cycle.txt",
+        "cache_refill_cycle.txt"
     };
     std::string outLogNames[] = {
-        "filter_out_cycle.txt",
+        "rob_in_cycle.txt",
         "axi_out_cycle.txt"
     };
 
@@ -57,9 +73,11 @@ Log::Log(const std::string& path)
         logs_map[log_type::AXI_IN] = std::ofstream(logDir + "/in_cycle/" + inLogNames[0]);
         logs_map[log_type::FILTER_IN] = std::ofstream(logDir + "/in_cycle/" + inLogNames[1]);
         logs_map[log_type::ADDRMAP_IN] = std::ofstream(logDir + "/in_cycle/" + inLogNames[2]);
-        logs_map[log_type::SCHEDULER_IN] = std::ofstream(logDir + "/in_cycle/" + inLogNames[3]);
-        logs_map[log_type::SCG_IN] = std::ofstream(logDir + "/in_cycle/" + inLogNames[4]);
-        logs_map[log_type::FILTER_OUT] = std::ofstream(logDir + "/out_cycle/" + outLogNames[0]);
+        logs_map[log_type::CACHE_IN] = std::ofstream(logDir + "/in_cycle/" + inLogNames[3]);
+        logs_map[log_type::SCHEDULER_IN] = std::ofstream(logDir + "/in_cycle/" + inLogNames[4]);
+        logs_map[log_type::SCG_IN] = std::ofstream(logDir + "/in_cycle/" + inLogNames[5]);
+        logs_map[log_type::CACHE_REFILL] = std::ofstream(logDir + "/in_cycle/" + inLogNames[6]);
+        logs_map[log_type::ROB_IN] = std::ofstream(logDir + "/out_cycle/" + outLogNames[0]);
         logs_map[log_type::AXI_OUT] = std::ofstream(logDir + "/out_cycle/" + outLogNames[1]);
     } catch (const fs::filesystem_error& e) {
         std::cout << "Error opening log file: " << e.what() << std::endl;
@@ -75,9 +93,11 @@ Log::Log(const std::string& path)
     logs_map[log_type::AXI_IN] << "cycle,araddr,id" << std::endl;
     logs_map[log_type::FILTER_IN] << "cycle,addr,id,token" << std::endl;
     logs_map[log_type::ADDRMAP_IN] << "cycle,addr,id,token" << std::endl;
+    logs_map[log_type::CACHE_IN] << "cycle,addr,id,token" << std::endl;
     logs_map[log_type::SCHEDULER_IN] << "cycle,id,token,rank,bg,bank,row,col" << std::endl;
     logs_map[log_type::SCG_IN] << "cycle,id,token,cmdtype,rank,bg,bank,row,col" << std::endl;
-    logs_map[log_type::FILTER_OUT] << "cycle,id,token" << std::endl;
+    logs_map[log_type::CACHE_REFILL] << "cycle,id,token,rank,bg,bank,row,col" << std::endl;
+    logs_map[log_type::ROB_IN] << "cycle,id,token,source" << std::endl;
     logs_map[log_type::AXI_OUT] << "cycle,id,token" << std::endl;
 
     // change ofstream to append mode
@@ -136,6 +156,16 @@ void Log::in_addrmap(const FilterTransaction &rft)
         << "," << rft.token << std::endl;
 }
 
+void Log::in_cache(const MappedTransaction &rmt)
+{
+    if (log_disabled()) {
+        return;
+    }
+
+    logs_map[log_type::CACHE_IN] << std::hex << controller->get_cycles() << "," << rmt.addr << "," << rmt.id \
+        << "," << rmt.token << std::endl;
+}
+
 void Log::in_scheduler(const MappedTransaction &rmt)
 {
     
@@ -160,13 +190,25 @@ void Log::in_scg(const MappedTransaction &rmt)
         << rmt.mapped_addr.row << "," << rmt.mapped_addr.col << std::endl;
 }
 
-void Log::out_filter(const MappedTransaction &rmt)
+void Log::in_cache_refill(const MappedTransaction &rmt)
 {
     if (log_disabled()) {
         return;
     }
 
-    logs_map[log_type::FILTER_OUT] << std::hex << controller->get_cycles() << "," << rmt.id << "," << rmt.token << std::endl;
+    logs_map[log_type::CACHE_REFILL] << std::hex << controller->get_cycles() << "," << rmt.id << "," << rmt.token << "," \
+        << 0 << "," << rmt.mapped_addr.bg << "," << rmt.mapped_addr.bank << "," \
+        << rmt.mapped_addr.row << "," << rmt.mapped_addr.col << std::endl;
+}
+
+void Log::rob_in_at(ID_TYPE id, TOKEN_TYPE token, CallerType source, TIME_TYPE cycle)
+{
+    if (log_disabled()) {
+        return;
+    }
+
+    logs_map[log_type::ROB_IN] << std::hex << cycle << "," << id << "," \
+        << token << "," << readback_source_name(source) << std::endl;
 }
 
 void Log::out_axi(ID_TYPE id, TOKEN_TYPE token)

@@ -24,36 +24,47 @@
 #include "Cache/Cache.h"
 #include "config.h"
 #include "Scg/TimingCheck.h"
+#include <utility>
 #include <vector>
 class AXI2UI;
 class TransactionSchedule;
 class Cache;
 class Log;
+class Controller;
 // class DFIPhaseFill;
 class SdramCommandGen {
 private:
+    const TIME_TYPE &cycles;
     std::vector<RequestGenerator> req_gen;
     BackGroundHold hold;
     TimingCheck timing_check;
+    FixedQueue<std::pair<MappedTransaction, TIME_TYPE>> readback_queue;
     int last_act_no, last_pre_no, last_cas_no;
     DFICommand phase0, phase1;
     // statistics
     uint64_t idle_ref_zq, idle_rs, idle_r2w, idle_w2r, idle_bf, idle_empty, \
-        idle_FAW, act_cnt, idle_w2wdr, idle_w2rdr, idle_r2rdr, idle_r2wdr;
+        idle_FAW, act_cnt, pre_cnt, cas_cnt, idle_w2wdr, idle_w2rdr, idle_r2rdr, idle_r2wdr;
     RequestGenerator *arb_act(bool &has_act, bool &has_act_req);
     RequestGenerator *arb_cas(bool &has_cas, bool &has_cas_req, \
         std::pair<CASFail, int> &cas_fail, const bool &has_act);
     RequestGenerator *arb_pre(bool &has_pre, bool &has_pre_req);
+    void enqueue_read_data_return(const MappedTransaction &trans);
+    void drain_ready_cache_read_data();
 public:
     bool addTrans(const MappedTransaction &);
+    bool hasReadyReadback() const;
+    MappedTransaction peekReadyReadback() const;
+    void commitReadyReadback();
     void set_axi2ui(AXI2UI *axi2ui);
-    SdramCommandGen();
+    SdramCommandGen(const TIME_TYPE &cycles);
     void step();
     void statistics() const;
+    void resetStats();
+    Controller *controller;
     TransactionSchedule *scheduler;
     AXI2UI *axi2ui;
     Cache *cache;
     Log *log;
-    // bool all_done();
+    bool all_done() const;
 };
 #endif // DRAM_COMMAND_GEN_H

@@ -26,6 +26,8 @@ MCSim是一个针对内存控制器的模拟器，高度参数化，可以模拟
 
 更多关于MCSim的说明文档在`docs/`目录下。
 
+[GitHub v1.1 更新说明（草稿）](CHANGELOG.md)介绍相对 v1.0 的主要变化及版本编号对应关系。
+
 ## LICENSE
 
 Copyright © 2020-2026 Institute of Computing Technology, Chinese Academy of Sciences.

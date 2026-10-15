@@ -21,18 +21,36 @@
 #include <fstream>
 #include <set>
 #include "top/Transaction.h"
+class Driver;
+class DepTracker;
+class Controller;
 class IdAllocator {
     // An ID is invalid if it doesn't return from MC;
     // For all valid IDs, allocate the least one.
     public:
-        IdAllocator() : max_id(2<<14-1), next_rid(0), next_wid(0) {}
+        IdAllocator(Driver *d)
+            // 中文说明：
+            // 1) max_id 原表达式 2<<14-1 在 -Werror 下会触发优先级告警；
+            // 2) 按成员声明顺序初始化，避免 -Wreorder。
+            : next_rid(0), next_wid(0), max_id((1u << 14) - 1),
+              driver(d), controller(nullptr) {}
+
+        // 中文说明：
+        // 为了把 mcsim 嵌入到 gem5 中，我们需要在“读/写完成”时把事件
+        // 传回 gem5（类似 DRAMsim3 的 read/write callback）。
+        // 这两个回调是可选的：mcsim 单独运行时可不设置。
+        std::function<void(ID_TYPE)> on_read_complete;
+        std::function<void(ID_TYPE)> on_write_complete;
+
         ID_TYPE allocate_rid();
         ID_TYPE allocate_wid();
-        void release_rid(ID_TYPE rid);
-        void release_wid(ID_TYPE wid);
+        void release_rid(ID_TYPE rid, int channel = 0);
+        void release_wid(ID_TYPE wid, int channel = 0);
         ID_TYPE next_rid;
         ID_TYPE next_wid;
         ID_TYPE max_id;
+        Driver *driver;
+        Controller *controller;
     private:
         std::set<ID_TYPE> free_rids;
         std::set<ID_TYPE> free_wids;
@@ -43,6 +61,10 @@ class Driver {
         virtual bool next_transaction() = 0;
         SysTransaction& get_transaction() {return st;}
         IdAllocator *ia;
+        DepTracker *dep_tracker;
+        struct {
+            ID_TYPE max_rid = 0;
+        } stats;   // statistics
     protected:
         SysTransaction st;
 };

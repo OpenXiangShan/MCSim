@@ -22,7 +22,19 @@ rw_trans_type Filter::addTrans(const AxiTransaction &r, const AxiTransaction &w,
     bool has_rd = type == RD_ONLY || type == RD_WR;
     bool has_wr = type == WR_ONLY || type == RD_WR;
     bool accept_rd = false, accept_wr = false;
-    if (has_rd && !rTransQ.full() && !wTransQ.contains(equal, r)) {
+    bool bypass_rd = false;
+    if (has_rd && rTransQ.empty() && !wTransQ.contains(equal, r)) {
+        FilterTransaction rft = do_filter(r);
+        FilterTransaction wft;
+        rw_trans_type rd_type = am->addTransComb(rft, wft, RD_ONLY);
+        bypass_rd = rd_type == RD_ONLY || rd_type == RD_WR;
+        if (bypass_rd) {
+            accept_rd = true;
+            log->in_filter(r);
+        }
+    }
+
+    if (has_rd && !bypass_rd && !rTransQ.full() && !wTransQ.contains(equal, r)) {
         rTransQ.push(r);
         accept_rd = true;
         log->in_filter(r);

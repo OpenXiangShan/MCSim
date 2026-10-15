@@ -16,13 +16,21 @@ Generates a **memory access address chart** for traces in the old format.
 
 ## **Trace Processing Scripts**
 
-*   **gen_random.py**: Generates random traces.
-*   **gen_sequential.py**: Generates sequential traces.
+*   **gen_random.py**: Generates random traces in the legacy three-field format.
+*   **gen_sequential.py**: Generates sequential traces in the legacy three-field format.
+*   **cook_bin_trace.py**: Run `python3 scripts/cook_bin_trace.py trace.bin` to convert a binary trace to the new five-field format in `trace.simple.new`.
+*   **gen_new_trace.py**: Run `python3 scripts/gen_new_trace.py trace.simple` to add random IDs and dependencies to a legacy three-field trace, producing `trace.simple.new`. These random fields do not reconstruct the originally recorded IDs or dependencies.
+
+See the [MCSim Usage Guide](MCSim_usage.md) for format configuration. The legacy preprocessing scripts `cook_trace.py` and `cook_trace.sh` are in `scripts/storage/`.
 
 ## **Batch Execution Scripts**
 
-*   **batch_run_trace.sh**: Specifies a trace directory and runs all traces under that directory using a single mcsim executable with a specific parameter configuration.
-*   **batch_run_compare.sh**: Specifies directories for mcsim executables and traces, then runs all traces under the trace directory using different mcsim executables with varying parameter configurations.
+*   **batch_run_trace.py**: Compiles and runs traces across multiple servers, iterates over parameter combinations defined by `PARAM_RANGES`, saves the results of each trace run, and generates `best_configs.log` and `test_results_<trace>.xlsx`.
+    *   Before use, adjust `SSH_USER`, `SERVERS_IP`, `TRACE_NAMES`, `ROOT_DIR`, and other settings at the top of the script for your environment, and ensure that passwordless SSH access is available on all servers.
+    *   For normal mode, set `SPEC_SCORE_MODE = False` in the script, then run `python3 scripts/batch_run_trace.py`.
+    *   `SPEC_SCORE_MODE` is currently set to `True` by default, so running the script directly enters SPEC scoring mode. You can also enable this mode with `python3 scripts/batch_run_trace.py --spec-score`. It automatically scans `SPEC_TRACE_BASE_DIR` and overrides `TRACE_NAMES`, then generates `spec_score_report.csv` after all traces finish. If `PARAM_RANGES` produces multiple parameter combinations, the report outputs each combination's `Score`, `Score_Per_GHz`, and overall geomean in separate `Config` and `Param_*` columns.
+*   **scripts/storage/batch_run_trace.sh**: Specifies a trace directory and runs all traces under that directory using a single mcsim executable with a specific parameter configuration.
+*   **scripts/storage/batch_run_compare.sh**: Specifies directories for mcsim executables and traces, then runs all traces under the trace directory using different mcsim executables with varying parameter configurations.
 
 ## LICENSE
 

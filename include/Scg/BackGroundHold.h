@@ -38,14 +38,14 @@ public:
     bool is_idle() const {return state == IDLE;}
     bool busOccupy() const;
     BackGroundHold(): ref_timer(tREFI - 4330 - 3), zq_timer(0), pre_timer(0), rfc_timer(0), zqcs_timer(0),
-        pend_ref(false), pend_zq(false), all_clear(false), state(IDLE) {}
+        ref_pend_count(0), pend_zq(false), all_clear(false), state(IDLE) {}
 private:
     int ref_timer, zq_timer;
     int pre_timer;
     int rfc_timer, zqcs_timer;
-    bool pend_ref, pend_zq;
+    int ref_pend_count;
+    bool pend_zq;
     bool all_clear;
-    // TIME_TYPE cycles;
     State state;
 };
 #endif // BACK_GROUND_HOLD_H

@@ -59,7 +59,7 @@ std::pair<MappedTransaction, bool> MSHR::get_unissued_request()
     return std::make_pair(MappedTransaction(), false);
 }
 
-bool MSHR::add_request(MappedTransaction t)
+bool MSHR::add_request(MappedTransaction t, size_t way)
 {
     auto map_it = mshr_map.find(t.addr);
     
@@ -80,7 +80,7 @@ bool MSHR::add_request(MappedTransaction t)
     }
         
     // MSHREntry with the same addr doesn't exists, new entry needed
-    if (add_mshr_entry(MSHREntry(t))) {
+    if (add_mshr_entry(MSHREntry(t, way))) {
         return true;   // new, success
     }
 

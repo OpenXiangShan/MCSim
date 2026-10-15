@@ -35,15 +35,16 @@ public:
         total_write_c(0), write_miss_c(0), \
         block_wcb_full(0), block_mshr_full(0), block_cacheline_not_ready(0), block_all_cacheline_not_ready(0), \
         prefetch_hit_c(0), prefetch_c(0), prefetch_correct_c(0) {};
-    void read_hit(const MappedTransaction &, CacheLine *);
+    void read_hit(const MappedTransaction &, CacheLine *, TIME_TYPE);
     void read_miss(const MappedTransaction &);
-    void write_hit(const MappedTransaction &, CacheLine *);
+    void write_hit(const MappedTransaction &, CacheLine *, TIME_TYPE);
     void write_miss(const MappedTransaction &);
     void wcb_full();
     void mshr_full();
     void cacheline_not_ready();   // "match but block" or "not match but all ways not ready"
     void all_cacheline_not_ready();   // "not match but all ways not ready"
     void prefetch();
+    void reset();
     void print() const;
 };
 

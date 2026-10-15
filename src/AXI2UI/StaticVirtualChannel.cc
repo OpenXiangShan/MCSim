@@ -42,6 +42,14 @@ StaticVirtualChannel::StaticVirtualChannel(size_t tok_cap)
     stats.rob_full = 0;
     stats.total_latency = 0;
     stats.read_count = 0;
+    stats.total_cache_hit_latency = 0;
+    stats.cache_read_hit_count = 0;
+    stats.total_cache_miss_latency = 0;
+    stats.cache_read_miss_count = 0;
+    stats.latency_distribution.clear();
+    stats.info_token_addr_map.clear();
+    stats.info_token_is_hit_map.clear();
+    stats.info_token_is_miss_map.clear();
 }
 
 size_t StaticVirtualChannel::vc_id(ID_TYPE id)
@@ -53,7 +61,7 @@ size_t StaticVirtualChannel::vc_id(ID_TYPE id)
     }
 }
 
-void StaticVirtualChannel::put_back(ID_TYPE id, TOKEN_TYPE token, uint64_t exp_rdback_time)
+void StaticVirtualChannel::put_back(ID_TYPE id, TOKEN_TYPE token, uint64_t exp_rdback_time, CallerType caller)
 {
     bool found_vc = false;
     bool found_vc_multiple = false;
@@ -70,16 +78,17 @@ void StaticVirtualChannel::put_back(ID_TYPE id, TOKEN_TYPE token, uint64_t exp_r
             assert(token < vc->exp_rdback_time.size());
             assert(vc->exp_rdback_time[token] == -1);
             vc->exp_rdback_time[token] = exp_rdback_time;
+            stats.info_token_addr_map.erase(token);
+            stats.info_token_is_hit_map[token] = (caller == CallerType::CACHE_HIT);
+            stats.info_token_is_miss_map[token] = (caller == CallerType::CACHE_MISS);
         }
     }
     assert(found_vc && !found_vc_multiple);
 }
 
-bool StaticVirtualChannel::addTrans(AxiTransaction &at)
+bool StaticVirtualChannel::peekToken(AxiTransaction &at)
 {
     if (at.is_read) {
-        bool is_new = false;
-
         // get vc with the same vc_id
         auto vc_it = std::find_if(
             vcs.begin(), vcs.end(),
@@ -91,17 +100,35 @@ bool StaticVirtualChannel::addTrans(AxiTransaction &at)
         assert(vc_it != vcs.end());
 
         VirtualChannel *vc_p = *vc_it;
-        assert(!is_new);
-        if (is_new) {
-            vc_p->vc_id = vc_id(at.id);
-        }
-
         if (vc_p->available_tokens.empty() || vc_p->rdback_buffer.full()) {
             stats.rob_full++;
             return false;
         }
+        at.token = vc_p->available_tokens.front();
+    }
+    return true;
+}
+
+bool StaticVirtualChannel::addTrans(AxiTransaction &at)
+{
+    if (at.is_read) {
+        if (!peekToken(at)) {
+            return false;
+        }
+
+        auto vc_it = std::find_if(
+            vcs.begin(), vcs.end(),
+            [&at, this](const VirtualChannel* vc) {
+                return vc->vc_id == this->vc_id(at.id);
+            }
+        );
+        assert(vc_it != vcs.end());
+
+        VirtualChannel *vc_p = *vc_it;
         TOKEN_TYPE token = vc_p->available_tokens.front();
+        assert(at.token == token);
         assert(token < vc_p->exp_rdback_time.size());
+        stats.info_token_addr_map[token] = at.addr;
         vc_p->available_tokens.pop();
         vc_p->rdback_buffer.push(std::make_pair(at.id, token));
         vc_p->exp_rdback_time[token] = -1;
@@ -116,26 +143,24 @@ bool StaticVirtualChannel::addTrans(AxiTransaction &at)
 }
 
 // data out axi
-void StaticVirtualChannel::step(uint64_t cycles, uint64_t &next_valid_rd_time, IdAllocator *ia, Log *log)
+void StaticVirtualChannel::step(uint64_t cycles, uint64_t &next_valid_rd_time, IdAllocator *ia, Log *log, int channel_id)
 {
     // virtual channel schedule METHOD 1: RoundRobinArbiter
-    VirtualChannel* vc = nullptr; 
-    {
-        static size_t last_i = 0;
-        if (vcs.size() == 1) {
-            if (!vcs[0]->rdback_buffer.empty()) {
-                vc = vcs[0];
+    VirtualChannel* vc = nullptr;
+    static size_t last_by_channel[NUM_CHANNELS] = {};
+    size_t &last_i = last_by_channel[channel_id];
+    if (cycles >= next_valid_rd_time) {
+        for (size_t n = 1; n <= vcs.size(); ++n) {
+            size_t i = (last_i + n) % vcs.size();
+            if (vcs[i]->rdback_buffer.empty()) continue;
+            auto token = vcs[i]->rdback_buffer.front().second;
+            auto ready_time = vcs[i]->exp_rdback_time[token];
+            if (ready_time != TIME_TYPE(-1) &&
+                ready_time + Axi2uiConfig::rob_to_axi_rlast_delay <= cycles) {
+                vc = vcs[i];
+                last_i = i;
+                break;
             }
-        } else {
-            size_t i = last_i;
-            do {
-                i = (i + 1) % vcs.size();
-                if (!vcs[i]->rdback_buffer.empty()) {
-                    vc = vcs[i];
-                    last_i = i;
-                    break;
-                }
-            } while (i != last_i);
         }
     }
 
@@ -183,17 +208,40 @@ void StaticVirtualChannel::step(uint64_t cycles, uint64_t &next_valid_rd_time, I
         ID_TYPE id = item.first;
         TOKEN_TYPE token = item.second;
         assert(token < vc->exp_rdback_time.size());
-        if (vc->exp_rdback_time[token] <= cycles && next_valid_rd_time <= cycles) {
+
+        // debug
+        // if ((cycles > next_valid_rd_time) && (cycles - next_valid_rd_time > 1000000)) {
+        //     std::cout << std::hex << \
+        //     "[ERROR]: wait for 0x" << stats.info_token_addr_map[token] << " too long" << std::endl;
+        //     exit(1);
+        // }
+
+        TIME_TYPE data_ready_time = vc->exp_rdback_time[token];
+        bool data_ready = data_ready_time != TIME_TYPE(-1) &&
+            data_ready_time + Axi2uiConfig::rob_to_axi_rlast_delay <= cycles;
+        if (data_ready && next_valid_rd_time <= cycles) {
             uint64_t latency = cycles - vc->acc_time[token];
             vc->rd_latency[latency]++;
             stats.total_latency += latency;
             stats.read_count++;
+            if (stats.info_token_is_hit_map[token]) {
+                stats.total_cache_hit_latency += latency;
+                stats.cache_read_hit_count++;
+                stats.info_token_is_hit_map.erase(token);
+            }
+            if (stats.info_token_is_miss_map[token]) {
+                stats.total_cache_miss_latency += latency;
+                stats.cache_read_miss_count++;
+                stats.info_token_is_miss_map.erase(token);
+            }
             // dump latency
             if (DumpConfig::DUMP_LATENCY) {
-                std::cout /*<< "returned token: " << token << ", latency: "*/<< latency << std::endl;
+                int bucket = latency / stats.granularity;
+                stats.latency_distribution[bucket]++;
+                // std::cout /*<< "returned token: " << token << ", latency: "*/<< latency << std::endl;
             }
             vc->rdback_buffer.pop();
-            ia->release_rid(id);
+            ia->release_rid(id, channel_id);
             vc->available_tokens.push(token);
             next_valid_rd_time = cycles + interval;
             log->out_axi(id, token);

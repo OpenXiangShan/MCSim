@@ -14,11 +14,11 @@
 * See the Mulan PSL v2 for more details.
 ***************************************************************************************/
 
-#include "Cache/Prefetcher.h"
+#include "Cache/StreamPrefetcher.h"
 #include "Cache/Cache.h"
 #include <assert.h>
 
-Prefetcher::Prefetcher()
+StreamPrefetcher::StreamPrefetcher()
     : state(IDLE),
       s1_input_queue(QueueDepth)
 {
@@ -39,7 +39,7 @@ Prefetcher::Prefetcher()
 }
 
 
-void Prefetcher::s1_init()
+void StreamPrefetcher::s1_init()
 {
     s4.need_prefetch = false;
     if (ghb[0].valid) {
@@ -52,24 +52,24 @@ void Prefetcher::s1_init()
     s1.miss_valid = !s1_input_queue.empty() && state == IDLE;
 }
 
-void Prefetcher::s2_init()
+void StreamPrefetcher::s2_init()
 {
     s2.stride_count = 0;
 }
 
-void Prefetcher::s2_to_s3_init()
+void StreamPrefetcher::s2_to_s3_init()
 {
     s3.fini = false;
     s3.index = 0;
 }
 
-void Prefetcher::s1_to_s4_init()
+void StreamPrefetcher::s1_to_s4_init()
 {
     s4.fini = false;
     s4.index = 0;
 }
 
-void Prefetcher::update_ghb()
+void StreamPrefetcher::update_ghb()
 {
     assert(!s1_input_queue.empty());
     for (int i = ghb.size() - 1; i > 0; i--) {
@@ -85,17 +85,17 @@ void Prefetcher::update_ghb()
     s1_input_queue.pop();
 }
 
-void Prefetcher::cal_stride()
+void StreamPrefetcher::cal_stride()
 {
     assert(ghb[0].valid);
     assert(s2.stride_count == 0);
     std::array<uint64_t, cfg.GHB_NUM_ENTRIES> stride_i;
 
-    auto match_i = [](Prefetcher::GhbEntry::GhbEntryStridePair &stride_pair, uint64_t i) {
+    auto match_i = [](StreamPrefetcher::GhbEntry::GhbEntryStridePair &stride_pair, uint64_t i) {
         return stride_pair.valid && (stride_pair.stride == i) \
             && (stride_pair.stride != 0) && stride_pair.count > 0;
     };
-    auto again_i = [](Prefetcher::GhbEntry::GhbEntryStridePair &stride_pair, uint64_t i) {
+    auto again_i = [](StreamPrefetcher::GhbEntry::GhbEntryStridePair &stride_pair, uint64_t i) {
         return stride_pair.valid && (stride_pair.stride == i) \
             && (stride_pair.stride == 0) && stride_pair.count > 0;
     };
@@ -182,7 +182,7 @@ void Prefetcher::cal_stride()
     }
 }
 
-void Prefetcher::update_stride()
+void StreamPrefetcher::update_stride()
 {
     // we have been updated stride in s2(cal_stride),
     // so we only need to wait for s2.stride_count cycles in s3(update_stride)
@@ -191,11 +191,11 @@ void Prefetcher::update_stride()
     s3.index++;
 }
 
-bool Prefetcher::is_prefetched(uint64_t addr)
+bool StreamPrefetcher::is_prefetched(uint64_t block_addr)
 {
     bool addr_exists = false;
     for (auto &queue : s4_output_queue) {
-        if (queue->contains(std::equal_to<uint64_t>(), addr)) {
+        if (queue->contains(std::equal_to<uint64_t>(), block_addr)) {
             addr_exists = true;
             break;
         }
@@ -204,10 +204,10 @@ bool Prefetcher::is_prefetched(uint64_t addr)
 }
 
 // generate prefetch request
-void Prefetcher::do_prefetch()
+void StreamPrefetcher::do_prefetch()
 {
     assert(ghb[0].valid);
-    s4.fini = s4.index >= cfg.PREFETCH_NUM;
+    s4.fini = s4.index >= cfg.PREFETCH_DEGREE;
     if (s4.fini) {
         return;
     }
@@ -223,7 +223,7 @@ void Prefetcher::do_prefetch()
         }
         if (stride_pair.valid && stride_pair.count >= cfg.PREFETCH_THRESHOLD) {
             // last cycle, set count to zero
-            if (s4.index == cfg.PREFETCH_NUM - 1) {
+            if (s4.index == cfg.PREFETCH_DEGREE - 1) {
                 stride_pair.count = 0;
             }
             if (s4_output_queue[i]->full()) {
@@ -241,7 +241,7 @@ void Prefetcher::do_prefetch()
 }
 
 // RoundRobin Arbiter step
-void Prefetcher::s4_rr_arb()
+void StreamPrefetcher::s4_rr_arb()
 {
     static int pointer = 0;
     for (int i = 1; i <= cfg.MAX_STREAMS; i++) {
@@ -257,51 +257,58 @@ void Prefetcher::s4_rr_arb()
     }
 }
 
-void Prefetcher::step()
+void StreamPrefetcher::step()
 {
     s4_rr_arb();
 
-    // FSM
-    switch (state) {
-        // s1
-        case IDLE:
-            s1_init();
-            if (s4.need_prefetch) {
-                s1_to_s4_init();
-                state = PREFETCH;
-            } else if (s1.miss_valid) {
-                update_ghb();
-                state = CAL_STRIDE;
-            }
-            break;
-        // s2
-        case CAL_STRIDE:
-            s2_init();
-            cal_stride();
-            s2_to_s3_init();
-            state = UPDATE_STRIDE;
-            break;
-        // s3
-        case UPDATE_STRIDE:
-            update_stride();
-            if (s3.fini) {
-                state = IDLE;
-            }
-            break;
-        // s4
-        case PREFETCH:
-            do_prefetch();
-            if (s4.fini) {
-                state = IDLE;
-            }
-            break;
+    bool finish_one = false;
+    bool no_request = false;
+    // while (!(finish_one || no_request)) {
+        // FSM
+        switch (state) {
+            // s1
+            case IDLE:
+                s1_init();
+                if (s4.need_prefetch) {
+                    s1_to_s4_init();
+                    state = PREFETCH;
+                } else if (s1.miss_valid) {
+                    update_ghb();
+                    state = CAL_STRIDE;
+                } else {
+                    no_request = true;
+                }
+                break;
+            // s2
+            case CAL_STRIDE:
+                s2_init();
+                cal_stride();
+                s2_to_s3_init();
+                state = UPDATE_STRIDE;
+                break;
+            // s3
+            case UPDATE_STRIDE:
+                update_stride();
+                if (s3.fini) {
+                    state = IDLE;
+                }
+                break;
+            // s4
+            case PREFETCH:
+                do_prefetch();
+                if (s4.fini) {
+                    finish_one = true;
+                    state = IDLE;
+                }
+                break;
 
-        default:
-            break;
-    }
+            default:
+                break;
+        }
+    // }
 }
 
-bool Prefetcher::addTrans(const MappedTransaction &t)
+bool StreamPrefetcher::addTrans(const MappedTransaction &t)
 {
     // TODO: Baiyang rtl suppose s1_in_queue is large enough
     // We always need the latest addr,

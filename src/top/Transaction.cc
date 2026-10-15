@@ -15,12 +15,16 @@
 ***************************************************************************************/
 
 #include "top/Transaction.h"
+#include "config.h"
 #include <fstream>
 #include <iostream>
 std::istream& operator>> (std::istream& is, SysTransaction& trans)
 {
     std::unordered_set<std::string> read_types = {"READ", "read", "r", "R"};
     std::string mem_op;
+    if (NEW_TRACE) {
+        is >> std::dec >> trans.id >> trans.dependency;
+    }
     is >> std::dec >>  trans.timestamp >> mem_op >> std::hex >> trans.addr;
     trans.is_read = (read_types.count(mem_op) == 1);
     // std::cout << " " << trans.timestamp << " 0x" << std::hex << trans.addr << std::endl << std::dec;

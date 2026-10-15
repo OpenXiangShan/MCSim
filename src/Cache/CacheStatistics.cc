@@ -17,7 +17,7 @@
 #include "Cache/CacheStatistics.h"
 #include "Cache/Cache.h"
 
-void CacheStatistics::read_hit(const MappedTransaction &t, CacheLine *cacheline)
+void CacheStatistics::read_hit(const MappedTransaction &t, CacheLine *cacheline, TIME_TYPE clk)
 {
     assert(t.is_read);
 
@@ -38,6 +38,9 @@ void CacheStatistics::read_hit(const MappedTransaction &t, CacheLine *cacheline)
             }
             cacheline->prefetch_accessed = true;
         }
+
+        cacheline->is_hited = true;   // TODO: maybe we should set this bit in tagArray writeBus
+        cacheline->last_access_cycle = clk;   // TODO: maybe we should set this bit in tagArray writeBus
     }
 }
 
@@ -51,7 +54,7 @@ void CacheStatistics::read_miss(const MappedTransaction &t)
     }
 }
 
-void CacheStatistics::write_hit(const MappedTransaction &t, CacheLine *cacheline)
+void CacheStatistics::write_hit(const MappedTransaction &t, CacheLine *cacheline, TIME_TYPE clk)
 {
     assert(!t.is_read);
     assert(!t.is_prefetch);
@@ -71,6 +74,9 @@ void CacheStatistics::write_hit(const MappedTransaction &t, CacheLine *cacheline
         }
         cacheline->prefetch_accessed = true;
     }
+
+    cacheline->is_hited = true;   // TODO: maybe we should set this bit in tagArray writeBus
+    cacheline->last_access_cycle = clk;   // TODO: maybe we should set this bit in tagArray writeBus
 }
 
 void CacheStatistics::write_miss(const MappedTransaction &t)
@@ -106,6 +112,23 @@ void CacheStatistics::prefetch()
     prefetch_c++;
 }
 
+void CacheStatistics::reset()
+{
+    total_access_c = 0;
+    total_miss_c = 0;
+    total_read_c = 0;
+    read_miss_c = 0;
+    total_write_c = 0;
+    write_miss_c = 0;
+    block_wcb_full = 0;
+    block_mshr_full = 0;
+    block_cacheline_not_ready = 0;
+    block_all_cacheline_not_ready = 0;
+    prefetch_hit_c = 0;
+    prefetch_c = 0;
+    prefetch_correct_c = 0;
+}
+
 void CacheStatistics::print() const
 {
     double hit_rate = (1.0 - static_cast<double>(total_miss_c) / total_access_c) * 100;
@@ -124,6 +147,8 @@ void CacheStatistics::print() const
     std::cout << "| block_all_cacheline_not_ready: " << block_all_cacheline_not_ready << std::endl;
 
     double prefetch_acc_rate = static_cast<double>(prefetch_correct_c) / prefetch_c * 100;
+    // TODO: this definition of "prefetch coverage" may describe "prefetch hit rate" instead of "prefetch coverage";
+    //       correct "prefetch coverage" should be "cache misses elimated by prefetch" / "total cache misses"
     double prefetch_coverage = static_cast<double>(prefetch_hit_c) / total_access_c * 100;
     std::cout << "| prefetch_c: " << prefetch_c << std::endl;
     std::cout << "| prefetch_correct_c: " << prefetch_correct_c \

@@ -43,6 +43,11 @@ DynamicVirtualChannel::DynamicVirtualChannel()
     stats.max_rob_size = 0;
     stats.total_latency = 0;
     stats.read_count = 0;
+    stats.total_cache_hit_latency = 0;
+    stats.cache_read_hit_count = 0;
+    stats.total_cache_miss_latency = 0;
+    stats.cache_read_miss_count = 0;
+    stats.latency_distribution.clear();
 }
 
 bool DynamicVirtualChannel::full() const
@@ -105,8 +110,9 @@ TOKEN_TYPE DynamicVirtualChannel::cmd_in(ID_TYPE id)
     free_bitmap[free_offset] = false;
     // set head_bitmap and id_tail
     bool is_head = true;
-    if (id_tail.contains(id)) {
-        is_head = (id_tail[id] == INVALID_TOKEN);
+    auto it = id_tail.find(id);
+    if (it != id_tail.end()) {
+        is_head = (it->second == INVALID_TOKEN);
     }
     if (is_head) {
         assert(!head_bitmap[free_offset]);
@@ -147,7 +153,7 @@ TOKEN_TYPE DynamicVirtualChannel::get_one_free()
     return INVALID_TOKEN;
 }
 
-void DynamicVirtualChannel::put_back(ID_TYPE id, TOKEN_TYPE token, uint64_t exp_rdback_time)
+void DynamicVirtualChannel::put_back(ID_TYPE id, TOKEN_TYPE token, uint64_t exp_rdback_time, CallerType caller)
 {
     assert(token < this->exp_rdback_time.size());
     assert(this->exp_rdback_time[token] == -1);
@@ -171,14 +177,14 @@ bool DynamicVirtualChannel::addTrans(AxiTransaction &at)
     return true;
 }
 
-void DynamicVirtualChannel::step(uint64_t cycles, uint64_t &next_valid_rd_time, IdAllocator *ia, Log *log)
+void DynamicVirtualChannel::step(uint64_t cycles, uint64_t &next_valid_rd_time, IdAllocator *ia, Log *log, int channel_id)
 {
     // data out axi
     if (next_valid_rd_time <= cycles) {
         ID_TYPE id;
         TOKEN_TYPE token;
         if (data_out(id, token)) {
-            ia->release_rid(id);
+            ia->release_rid(id, channel_id);
             log->out_axi(id, token);
             next_valid_rd_time = cycles + interval;
         }
@@ -195,7 +201,9 @@ void DynamicVirtualChannel::step(uint64_t cycles, uint64_t &next_valid_rd_time, 
             stats.read_count++;
             // dump latency
             if (DumpConfig::DUMP_LATENCY) {
-                std::cout /*<< "returned token: " << token << ", latency: "*/<< latency << std::endl;
+                int bucket = latency / stats.granularity;
+                stats.latency_distribution[bucket]++;
+                // std::cout /*<< "returned token: " << token << ", latency: "*/<< latency << std::endl;
             }
             data_in(rdback_buffer[offset].first, offset);
             exp_rdback_time[offset] = -1;

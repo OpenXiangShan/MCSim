@@ -15,79 +15,179 @@
 ***************************************************************************************/
 
 #include "top/Controller.h"
+#include "AddrMap/AddrMap.h"  // Include header for calculate_channel declaration
+#include <array>
 
-Controller::Controller(IdAllocator *ia) 
-    : axi2ui(Axi2uiConfig::rob_size),   // tok_cap equals rob_size
-      ft(filter_size),
-      am(addr_map_size),
-      cache(),
-      cycles(59),
-      scheduler(),
-      scg(),
-      log(DumpConfig::dump_log_dir_path)
+#ifdef GEM5_MODE
+Controller::Controller(IdAllocator *ia)
+    : log(DumpConfig::dump_log_dir_path)
+#else
+Controller::Controller(IdAllocator *ia, const std::string &log_dir)
+    : log(log_dir)
+#endif
 {
-    // axi2ui
-    axi2ui.ft  = &ft;
-    axi2ui.log = &log;
-    axi2ui.ia = ia;
-    // ft
-    ft.am  = &am;
-    ft.log = &log;
-    // am
-    am.scheduler = &scheduler;
-    am.cache     = &cache;
-    am.log       = &log;
-    // cache
-    cache.set_axi2ui(&axi2ui);
-    cache.scheduler = &scheduler;
-    // scheduler
-    scheduler.set_scg(&scg);
-    scheduler.axi2ui = &axi2ui;
-    scheduler.log    = &log;
-    // scg
-    scg.set_axi2ui(&axi2ui);
-    scg.scheduler = &scheduler;
-    scg.cache     = &cache;
-    scg.log       = &log;
+    cycles = 59;
+    readback_rr_next.fill(0);
+    
+    // Initialize all channels
+    for (int ch = 0; ch < NUM_CHANNELS; ++ch) {
+        channels[ch].axi2ui = new AXI2UI(cycles, Axi2uiConfig::rob_size, ch);
+        channels[ch].ft = new Filter(filter_size);
+        channels[ch].am = new AddrMap(addr_map_size);
+        channels[ch].cache = new Cache();
+        channels[ch].scg = new SdramCommandGen(cycles);
+        channels[ch].scheduler = new TransactionSchedule();
+        
+        // Setup inter-component connections for this channel
+        // axi2ui
+        channels[ch].axi2ui->ft  = channels[ch].ft;
+        channels[ch].axi2ui->log = &log;
+        channels[ch].axi2ui->ia = ia;
+        // ft
+        channels[ch].ft->am  = channels[ch].am;
+        channels[ch].ft->log = &log;
+        // am
+        channels[ch].am->scheduler = channels[ch].scheduler;
+        channels[ch].am->cache     = channels[ch].cache;
+        channels[ch].am->log       = &log;
+        // cache
+        channels[ch].cache->set_axi2ui(channels[ch].axi2ui);
+        channels[ch].cache->controller = this;
+        channels[ch].cache->scheduler = channels[ch].scheduler;
+        channels[ch].cache->log = &log;
+        // scheduler
+        channels[ch].scheduler->set_scg(channels[ch].scg);
+        channels[ch].scheduler->axi2ui = channels[ch].axi2ui;
+        channels[ch].scheduler->log    = &log;
+        // scg
+        channels[ch].scg->set_axi2ui(channels[ch].axi2ui);
+        channels[ch].scg->scheduler  = channels[ch].scheduler;
+        channels[ch].scg->cache      = channels[ch].cache;
+        channels[ch].scg->log        = &log;
+        channels[ch].scg->controller = this;
+    }
     // log
     log.set_controller(this);
 }
 
+Controller::~Controller()
+{
+    // Cleanup all channels
+    for (int ch = 0; ch < NUM_CHANNELS; ++ch) {
+        delete channels[ch].axi2ui;
+        delete channels[ch].ft;
+        delete channels[ch].am;
+        delete channels[ch].cache;
+        delete channels[ch].scg;
+        delete channels[ch].scheduler;
+    }
+}
+
 void Controller::statistics() const
 {
-    axi2ui.statistics();
-    cache.statistics();
-    scheduler.statistics();
-    scg.statistics();
+    std::cout << "============= CONTROLLER STATISTICS =============" << std::endl;
+    std::cout << "Total Channels: " << NUM_CHANNELS << std::endl;
+    
+    for (int ch = 0; ch < NUM_CHANNELS; ++ch) {
+        std::cout << "\n--- Channel " << ch << " ---" << std::endl;
+        channels[ch].axi2ui->statistics();
+        channels[ch].scg->statistics();
+        channels[ch].scheduler->statistics();
+        channels[ch].cache->statistics();
+    }
+    
     std::cout << "=====================================================" << std::endl;
 }
 
-bool Controller::addTrans(SysTransaction& st)
+void Controller::resetStats()
 {
-    return axi2ui.addTrans(st);
+    for (int ch = 0; ch < NUM_CHANNELS; ++ch) {
+        channels[ch].axi2ui->resetStats();
+        channels[ch].scg->resetStats();
+        channels[ch].scheduler->resetStats();
+        channels[ch].cache->resetStats();
+    }
 }
 
+bool Controller::addTrans(const SysTransaction& st)
+{
+    // Calculate channel from address
+    int ch = calculate_channel(st.addr);
+    assert(ch >= 0 && ch < NUM_CHANNELS);
+    
+    // Add transaction to the appropriate channel
+    return channels[ch].axi2ui->addTrans(st);
+}
+
+bool Controller::willAccept(uint64_t addr, bool is_write) const
+{
+    // 中文说明：mcsim 内部用 is_read 来区分，这里做一次转换。
+    int ch = calculate_channel(addr);
+    return channels[ch].axi2ui->willAccept(addr, !is_write);
+}
+ 
 TIME_TYPE Controller::get_cycles() const {return cycles;}
+
+void Controller::arbitrate_readback(int ch)
+{
+    bool scg_valid = channels[ch].scg->hasReadyReadback();
+    bool cache_valid = channels[ch].cache->hasReadyReadback();
+    if (!scg_valid && !cache_valid) {
+        return;
+    }
+
+    int chosen;
+    if (scg_valid && cache_valid) {
+        chosen = readback_rr_next[ch];
+    } else {
+        chosen = scg_valid ? 0 : 1;
+    }
+
+    if (chosen == 0) {
+        assert(scg_valid);
+        channels[ch].scg->commitReadyReadback();
+    } else {
+        assert(cache_valid);
+        channels[ch].cache->commitReadyReadback();
+    }
+    readback_rr_next[ch] = 1 - chosen;
+}
 
 void Controller::step()
 {
     ++cycles;
-    scg.step();
-    scheduler.step();
-    cache.step();
-    // am.step();
-    ft.step();
-    axi2ui.step();
-}
-
-
-bool CmdStation::is_conflict() const
-{
-    return conflict;
+    
+    // Step all channels in round-robin fashion
+    for (int ch = 0; ch < NUM_CHANNELS; ++ch) {
+        channels[ch].scg->step();
+        channels[ch].scheduler->step();
+        channels[ch].cache->step();
+        arbitrate_readback(ch);
+        channels[ch].ft->step();
+        channels[ch].axi2ui->step();
+    }
 }
 
 bool Controller::all_done() const
 {
-    // if axi2ui's read back is done, then all done 
-    return axi2ui.all_done();// && ft.all_done() && am.all_done();
+    for (int ch = 0; ch < NUM_CHANNELS; ++ch) {
+        if (SchedulerConfig::switch_to_w_when_r_empty) {
+            if (!(channels[ch].axi2ui->all_done() /* &&
+                  channels[ch].ft->all_done() &&
+                  channels[ch].am->all_done() &&
+                  channels[ch].cache->all_done() &&
+                  channels[ch].scheduler->all_done() &&
+                  channels[ch].scg->all_done() */)) {
+                return false;
+            }
+        } else {
+            // If scheduler doesn't switch to w when r empty,
+            // there will be entries remain in the wstation.
+            // So we only check axi2ui(ROB) all done.
+            if (!channels[ch].axi2ui->all_done()) {
+                return false;
+            }
+        }
+    }
+    return true;
 }

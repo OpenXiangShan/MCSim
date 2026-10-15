@@ -21,10 +21,12 @@
 #include <vector>
 #include "top/Transaction.h"
 #include "utils/FixedQueue.h"
+class SdramCommandGen;
 // generate act, pre, case request
 class RequestGenerator {
 public:
     RequestGenerator();
+    size_t bank_id;   // index
     // FSM
     enum State{
         QUERY_PAGE,
@@ -46,8 +48,44 @@ public:
     bool pre_req, act_req, cas_req;
     bool act_resp, pre_resp, cas_resp;
     FixedQueue<MappedTransaction> transQ;
+    SdramCommandGen *scg;
+    // statistics
+    struct {
+        public:
+            uint64_t row_hit_cnt = 0;
+            uint64_t row_miss_cnt = 0;
+            void row_hit() { if (!row_counted) { row_hit_cnt++; row_counted = true; } }
+            void row_miss() { if (!row_counted) { row_miss_cnt++; row_counted = true; } }
+            float row_hit_rate() const {
+                if (row_hit_cnt + row_miss_cnt == 0)
+                    return 0;
+                return (float)row_hit_cnt / (row_hit_cnt + row_miss_cnt);
+            }
+            void cas_finish() { row_counted = false; }
+        private:
+            bool row_counted = false;
+    } stats;
+    class DY_PROF {
+        public:
+            // param
+            static constexpr uint64_t T = 1000;   // clk for period
+            static constexpr uint64_t t = 100;   // // clk for profiling during a period
+            static constexpr float R = 0.2;   // row_hit_rate threshold
+            // profiling info
+            uint64_t p_i = 0;   // How many period has passed
+            uint64_t last_row_hit = 0;   // How many row hit during all previous periods
+            uint64_t last_row_miss = 0;   // How many row miss during all previous periods
+            uint64_t period_row_hit = 0;
+            uint64_t period_row_miss = 0;
+            // result
+            bool should_close = false;
+            // functions
+            void step(SdramCommandGen* scg, RequestGenerator* rg);
+    } dr_prof;   // dynamic row profiling
     // MappedTransaction trans;
 private:
+    int close_row_timer = 0;
+    bool should_close();
     page p;
     State state;
 };

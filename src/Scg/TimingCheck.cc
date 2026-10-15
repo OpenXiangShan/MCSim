@@ -16,15 +16,27 @@
 
 #include "Scg/TimingCheck.h"
 #include <assert.h>
-TimingCheck::TimingCheck(): cycles(0), last_actBG(0), last_casBG(0)
+
+static int get_bank_group_id(unsigned int rank, unsigned int bg)
+{
+    return rank * bg_num + bg;
+}
+
+static int get_bank_id(unsigned int rank, unsigned int bg, unsigned int bank)
+{
+    return get_bank_group_id(rank, bg) * bank_per_bg + bank;
+}
+
+TimingCheck::TimingCheck(const TIME_TYPE &cycles)
+    : cycles(cycles), last_actBG(0), last_casBG(0)
 {
     tRTW_exp = tRTPA_exp = tRASA_exp = tWRA_exp = 0;
-    tCCD_L_exp.resize(bg_num, 0);
-    tCCD_S_exp.resize(bg_num, 0);
-    tRRD_L_exp.resize(bg_num, 0);
-    tRRD_S_exp.resize(bg_num, 0);
-    tWTR_L_exp.resize(bg_num, 0);
-    tWTR_S_exp.resize(bg_num, 0);
+    tCCD_L_exp.resize(rank_num * bg_num, 0);
+    tCCD_S_exp.resize(rank_num * bg_num, 0);
+    tRRD_L_exp.resize(rank_num * bg_num, 0);
+    tRRD_S_exp.resize(rank_num * bg_num, 0);
+    tWTR_L_exp.resize(rank_num * bg_num, 0);
+    tWTR_S_exp.resize(rank_num * bg_num, 0);
     tWR_exp.resize(all_bank_num, 0);
     tRTP_exp.resize(all_bank_num, 0);
     tRAS_exp.resize(all_bank_num, 0);
@@ -41,28 +53,29 @@ TimingCheck::TimingCheck(): cycles(0), last_actBG(0), last_casBG(0)
 bool TimingCheck::check_act(const MappedTransaction &act) const
 {
     // return true;
-    int bank_id = act.mapped_addr.bg * bank_per_bg + act.mapped_addr.bank;
+    int bank_group_id = get_bank_group_id(act.mapped_addr.rank, act.mapped_addr.bg);
+    int bank_id = get_bank_id(act.mapped_addr.rank, act.mapped_addr.bg, act.mapped_addr.bank);
     return cycles >= tRP_exp[bank_id] && act_count_rank[act.mapped_addr.rank] < 4 \
-        && cycles >= tRRD_L_exp[act.mapped_addr.bg] && cycles >= tRRD_S_exp[act.mapped_addr.bg];
+        && cycles >= tRRD_L_exp[bank_group_id] && cycles >= tRRD_S_exp[bank_group_id];
 }
 
 bool TimingCheck::check_pre(const MappedTransaction &pre) const
 {
-    int bank_id = pre.mapped_addr.bg * bank_per_bg + pre.mapped_addr.bank;
+    int bank_id = get_bank_id(pre.mapped_addr.rank, pre.mapped_addr.bg, pre.mapped_addr.bank);
     return cycles >= tRTP_exp[bank_id] && cycles >= tRAS_exp[bank_id] && cycles >= tWR_exp[bank_id];
 }
 
 std::pair<CASFail, TIME_TYPE> TimingCheck::check_cas(const MappedTransaction &cas) const
 {
-    int bank_id = cas.mapped_addr.bg * bank_per_bg + cas.mapped_addr.bank;
-    TIME_TYPE tCCD_exp =  std::max(tCCD_L_exp[cas.mapped_addr.bg], tCCD_S_exp[cas.mapped_addr.bg]);// cas.mapped_addr.bg == last_casBG ? tCCD_L_exp : tCCD_S_exp;
-    // if (cas.is_read) {
-    //     // TIME_TYPE tWTR_exp = tWTR_L_exp;
-    //     TIME_TYPE tWTR_exp = cas.mapped_addr.bg == last_casBG ? tWTR_L_exp : tWTR_S_exp;
-    //     return cycles >= tWTR_exp && cycles >= tRCD_exp[bank_id] && cycles >= tCCD_exp;
-    // } else {
-    //     return cycles >= tCCD_exp && cycles >= tRCD_exp[bank_id] && cycles >= tRTW_exp;
-    // }
+    int bank_group_id = get_bank_group_id(cas.mapped_addr.rank, cas.mapped_addr.bg);
+    int bank_id = get_bank_id(cas.mapped_addr.rank, cas.mapped_addr.bg, cas.mapped_addr.bank);
+    TIME_TYPE tCCD_exp =  std::max(tCCD_L_exp[bank_group_id], tCCD_S_exp[bank_group_id]);// cas.mapped_addr.bg == last_casBG ? tCCD_L_exp : tCCD_S_exp;
+    
+    // idle for bg conflict
+    if (cycles < tCCD_exp) {
+        return std::make_pair(CASFail::BG_CONFLICT, tCCD_exp - cycles);
+    }
+    
     // idle for row switch
     if (cycles < tRCD_exp[bank_id]) {
         return std::make_pair(CASFail::ROW_SWITCH, tRCD_exp[bank_id] - cycles);
@@ -70,7 +83,7 @@ std::pair<CASFail, TIME_TYPE> TimingCheck::check_cas(const MappedTransaction &ca
 
     // idle for rw switch
     if (cas.is_read) {
-        TIME_TYPE tWTR_exp = std::max(tWTR_L_exp[cas.mapped_addr.bg], tWTR_S_exp[cas.mapped_addr.bg]); // cas.mapped_addr.bg == last_casBG ? tWTR_L_exp : tWTR_S_exp;
+        TIME_TYPE tWTR_exp = std::max(tWTR_L_exp[bank_group_id], tWTR_S_exp[bank_group_id]); // cas.mapped_addr.bg == last_casBG ? tWTR_L_exp : tWTR_S_exp;
         if (cycles < tWTR_exp) {
             return std::make_pair(CASFail::W2R, tWTR_exp - cycles);
         }
@@ -94,10 +107,6 @@ std::pair<CASFail, TIME_TYPE> TimingCheck::check_cas(const MappedTransaction &ca
         }
     }
 
-    // idle for bg conflict
-    if (cycles < tCCD_exp) {
-        return std::make_pair(CASFail::BG_CONFLICT, tCCD_exp - cycles);
-    }
     return std::make_pair(CASFail::NONE, 0);
 }
 
@@ -108,7 +117,6 @@ bool TimingCheck::check_prea() const
 
 void TimingCheck::step()
 {
-    ++cycles;
     // update timers
     // tFAW window
     bool has_act_phase0 = phase0->type == DFI_TYPE::ACT;
@@ -123,52 +131,58 @@ void TimingCheck::step()
 
     // tRRD
     if (phase0->type == DFI_TYPE::ACT) {
-        last_actBG = phase0->bg;
-        tRRD_L_exp[phase0->bg] = cycles + tRRD_L;
-        for (int i = 0; i < bg_num; ++i) {
-            if (i != phase0->bg) {
+        int bank_group_id = get_bank_group_id(phase0->rank, phase0->bg);
+        last_actBG = bank_group_id;
+        tRRD_L_exp[bank_group_id] = cycles + tRRD_L;
+        for (int i = 0; i < rank_num * bg_num; ++i) {
+            if (i != bank_group_id) {
                 tRRD_S_exp[i] = cycles + tRRD_S;
             }
         }
     } else if (phase1->type == DFI_TYPE::ACT) {
-        last_actBG = phase1->bg;
-        tRRD_L_exp[phase1->bg] = cycles + tRRD_L + 1;
-        for (int i = 0; i < bg_num; ++i) {
-            if (i != phase1->bg) {
+        int bank_group_id = get_bank_group_id(phase1->rank, phase1->bg);
+        last_actBG = bank_group_id;
+        tRRD_L_exp[bank_group_id] = cycles + tRRD_L + 1;
+        for (int i = 0; i < rank_num * bg_num; ++i) {
+            if (i != bank_group_id) {
                 tRRD_S_exp[i] = cycles + tRRD_S + 1;
             }
         }
     }
     // tCCD
     if (phase0->type == DFI_TYPE::WRITE || phase0->type == DFI_TYPE::READ) {
-        last_casBG = phase0->bg;
-        tCCD_L_exp[phase0->bg] = cycles + tCCD_L;
-        for (int i = 0; i < bg_num; ++i) {
-            if (i != phase0->bg) {
+        int bank_group_id = get_bank_group_id(phase0->rank, phase0->bg);
+        last_casBG = bank_group_id;
+        tCCD_L_exp[bank_group_id] = cycles + tCCD_L;
+        for (int i = 0; i < rank_num * bg_num; ++i) {
+            if (i != bank_group_id) {
                 tCCD_S_exp[i] = cycles + tCCD_S;
             }
         }
     } else if (phase1->type == DFI_TYPE::WRITE || phase1->type == DFI_TYPE::READ) {
-        last_casBG = phase1->bg;
-        tCCD_L_exp[phase1->bg] = cycles + tCCD_L + 1;
-        for (int i = 0; i < bg_num; ++i) {
-            if (i != phase1->bg) {
+        int bank_group_id = get_bank_group_id(phase1->rank, phase1->bg);
+        last_casBG = bank_group_id;
+        tCCD_L_exp[bank_group_id] = cycles + tCCD_L + 1;
+        for (int i = 0; i < rank_num * bg_num; ++i) {
+            if (i != bank_group_id) {
                 tCCD_S_exp[i] = cycles + tCCD_S + 1;
             }
         }
     }
     // tWTR
     if (phase0->type == DFI_TYPE::WRITE) {
-        tWTR_L_exp[phase0->bg] = cycles + tWTR_L;
-        for (int i = 0; i < bg_num; ++i) {
-            if (i != phase0->bg) {
+        int bank_group_id = get_bank_group_id(phase0->rank, phase0->bg);
+        tWTR_L_exp[bank_group_id] = cycles + tWTR_L;
+        for (int i = 0; i < rank_num * bg_num; ++i) {
+            if (i != bank_group_id) {
                 tWTR_S_exp[i] = cycles + tWTR_S;
             }
         }
     } else if (phase1->type == DFI_TYPE::WRITE) {
-        tWTR_L_exp[phase1->bg] = cycles + tWTR_L + 1;
-        for (int i = 0; i < bg_num; ++i) {
-            if (i != phase1->bg) {
+        int bank_group_id = get_bank_group_id(phase1->rank, phase1->bg);
+        tWTR_L_exp[bank_group_id] = cycles + tWTR_L + 1;
+        for (int i = 0; i < rank_num * bg_num; ++i) {
+            if (i != bank_group_id) {
                 tWTR_S_exp[i] = cycles + tWTR_S + 1;
             }
         }
@@ -181,42 +195,42 @@ void TimingCheck::step()
     }
     // tWR, per bank
     if (phase0->type == DFI_TYPE::WRITE) {
-        int bank_id = phase0->bg * bank_per_bg + phase0->bank;
+        int bank_id = get_bank_id(phase0->rank, phase0->bg, phase0->bank);
         tWR_exp[bank_id] = cycles + tWR;
         tWRA_exp = tWR_exp[bank_id];
     } else if (phase1->type == DFI_TYPE::WRITE) {
-        int bank_id = phase1->bg * bank_per_bg + phase1->bank;
+        int bank_id = get_bank_id(phase1->rank, phase1->bg, phase1->bank);
         tWR_exp[bank_id] = cycles + tWR + 1;
         tWRA_exp = tWR_exp[bank_id];
     }
     // tRTP, per bank
     if (phase0->type == DFI_TYPE::READ) {
-        int bank_id = phase0->bg * bank_per_bg + phase0->bank;
+        int bank_id = get_bank_id(phase0->rank, phase0->bg, phase0->bank);
         tRTP_exp[bank_id] = cycles + tRTP;
         tRTPA_exp = tRTP_exp[bank_id];
     } else if (phase1->type == DFI_TYPE::READ) {
-        int bank_id = phase1->bg * bank_per_bg + phase1->bank;
+        int bank_id = get_bank_id(phase1->rank, phase1->bg, phase1->bank);
         tRTP_exp[bank_id] = cycles + tRTP + 1;
         tRTPA_exp = tRTP_exp[bank_id];
     }
     // tRAS and tRCD, both per bank
     if (phase0->type == DFI_TYPE::ACT) {
-        int bank_id = phase0->bg * bank_per_bg + phase0->bank;
+        int bank_id = get_bank_id(phase0->rank, phase0->bg, phase0->bank);
         tRAS_exp[bank_id] = cycles + tRAS;
         tRCD_exp[bank_id] = cycles + tRCD;
         tRASA_exp = tRAS_exp[bank_id];
     } else if (phase1->type == DFI_TYPE::ACT) {
-        int bank_id = phase1->bg * bank_per_bg + phase1->bank;
+        int bank_id = get_bank_id(phase1->rank, phase1->bg, phase1->bank);
         tRAS_exp[bank_id] = cycles + tRAS + 1;
         tRCD_exp[bank_id] = cycles + tRCD + 1;
         tRASA_exp = tRAS_exp[bank_id];
     }
     // tRP, per bank
     if (phase0->type == DFI_TYPE::PRE) {
-        int bank_id = phase0->bg * bank_per_bg + phase0->bank;
+        int bank_id = get_bank_id(phase0->rank, phase0->bg, phase0->bank);
         tRP_exp[bank_id] = cycles + tRP;
     } else if (phase1->type == DFI_TYPE::PRE) {
-        int bank_id = phase1->bg * bank_per_bg + phase1->bank;
+        int bank_id = get_bank_id(phase1->rank, phase1->bg, phase1->bank);
         tRP_exp[bank_id] = cycles + tRP + 1;
     }
     // tW2WDR and tW2RDR, both per rank

@@ -23,10 +23,11 @@
 #include "utils/common.h"
 struct SysTransaction {
    ID_TYPE id;
+   uint64_t dependency = 0;
    bool is_read; 
    uint64_t addr;
    TIME_TYPE timestamp;
-   uint64_t cycle;   // at which cycle controller commit this trace sucessfully
+   uint64_t cycle;   // at which cycle controller send this trace  to AXI2UI successfully
    friend std::istream& operator>>(std::istream& is, SysTransaction& trans);
 };
 
@@ -49,6 +50,7 @@ struct FilterTransaction : AxiTransaction {
 };
 
 struct MappedAddr {
+    unsigned int channel: 1;   // Channel ID (0 or 1)
     unsigned int rank: 1;
     unsigned int row: 16;
     unsigned int col: 10;

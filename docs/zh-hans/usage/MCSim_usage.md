@@ -2,15 +2,29 @@
 
 本文介绍MCSim的使用方法，包括安装、编译、运行和参数配置等。
 
+本版本的 RTL 对齐目标为 **Baiyang-V1.0**。
+
 ## 安装和编译
 
+需要 GNU Make 和支持 C++20 的 `g++`。以下命令获取 GitHub 的 v1.1 发布分支；已有源码可直接编译。
+
 ```shell
-git clone https://github.com/OpenXiangShan/MCSim
+git clone --branch MCSim-v1.1 https://github.com/OpenXiangShan/MCSim
 cd MCSim
 make -j$(nproc)
 ```
 
 编译结果为`./mcsim`。
+
+其他构建目标如下，均在项目根目录执行：
+
+| 用途 | 命令 | 产物 |
+| --- | --- | --- |
+| Verilator 库 | `make -j$(nproc) verilator-lib` | `build-verilator-lib/libmcsim.so` 和 `libmcsim.a` |
+| C API 冒烟测试 | `make -j$(nproc) verilator-lib-smoke` | 构建并运行 `build-verilator-lib/mcsim_c_api_smoke` |
+| gem5 库 | `make -j$(nproc) lib GEM5_DIR=/path/to/gem5` | `/path/to/gem5/ext/mcsim/libmcsim.so` |
+
+gem5 目标使用 C++17 和 GCC 的 `-fconcepts`；将 `/path/to/gem5` 替换为实际目录，并先创建其 `ext/mcsim/` 子目录。
 
 ## 运行
 
@@ -22,8 +36,16 @@ trace驱动模式，需要指定trace文件：
 ./mcsim -d 1 -t <trace路径>
 ```
 
-`mc_trace`目录下已有trace示例，格式：`tm, r/w, addr`，其中tm代表时间戳，r/w代表读写，addr代表访存地址。此外，也可以用scripts下的脚本生成随机/顺序trace。
+当前默认 `NEW_TRACE = true`，每行格式为 `id dependency timestamp R/W addr`，用空白分隔。例如：
 
+```text
+0 0 0 R 0x80000000
+1 0 4 W 0x80000040
+```
+
+依次为事务 ID、向前依赖距离（`0` 表示无依赖）、时间戳、读写类型和地址。前三项为十进制，地址为十六进制；时间戳乘以 `timestamp_x` 后对应 MC 周期。
+
+旧格式为三列 `timestamp R/W addr`，使用时需设置 `include/config.h` 中的 `NEW_TRACE = false` 并重新编译。`USE_DEPENDENCY` 默认是 `false`，仅控制依赖约束，不改变输入列数。使用 `mc_trace/` 中的 trace 或脚本生成的 trace 时，请确认其格式与配置一致，工具说明见[脚本使用说明](scripts_usage.md)。
 
 随机驱动模式，需要指定产生读的比例：
 
@@ -31,18 +53,21 @@ trace驱动模式，需要指定trace文件：
 ./mcsim -d 2 -r 0.9  # 90%读
 ```
 
+随机模式可用 `-n <数量>` 设置请求数，默认值为 `1000000`；当前实现中 `-n` 不限制 trace 模式读取的条数。
+
 ## 参数配置
 
 参数配置文件为`include/config.h`，目前所有模块共用一个`config.h`，因此修改配置后所有模块均需重新编译。
 
 一些关键参数如下：
 
-- **`freq`**：模拟MC时钟频率，单位MHz。
+- **`freq`**：模拟MC时钟频率，单位MHz，当前默认是 `800`。
 - **`TimingConfig`**：DFI时序参数。
-- **`timestamp_x`**：用于调整时间戳间隔。
+- **`timestamp_x`**：用于调整时间戳间隔，当前默认是 `1`。
+- **`NUM_CHANNELS`**：通道数，当前默认是 `2`。
 - **`vc_num`**：AXI2UI中虚通道的个数。（单个虚通道内部保序返回axi id，不同虚通道之间乱序返回axi id）
-- **`filter_mode`**：当前默认是`ALL2CACHE`，表示**当`CACHE_EN`开启时，命令全进Cache**（但如果`CACHE_EN`没有开启，命令依旧不进Cache）。
-- **`CACHE_EN`**：Cache开关。
+- **`filter_mode`**：当前默认是 `ALL2SCHED`，请求直接进入 Scheduler。
+- **`CACHE_EN`**：Cache开关，当前默认是 `false`。
 - **`PrefetcherConfig.type`**：Cache子模块prefetcher的类型，为`NONE`时表示关闭prefetcher。
 - **`DumpConfig`**：用于控制mcsim打印的信息。其中，**`DUMP_MODULEWISE_LOG`**开启时，会将各个模块间的关键信号传输事件以csv格式记录在指定目录下，类似于波形。
 
@@ -53,6 +78,13 @@ trace驱动模式，需要指定trace文件：
 1. 修改`include/config.h`，开启**DUMP_MODULEWISE_LOG**，重新编译并运行；（由于要频繁地写日志文件，该选项打开时，会严重拖慢mcsim运行速度，因此一般情况下推荐关闭该选项）
 2. 在项目根目录下，执行 **make latency**；
 3. 查看生成的csv文件 `logs/latency.csv`。
+
+运行时可通过 `-l run.logs/example` 指定日志目录；该选项本身不会启用模块日志。`make latency` 固定读取 `logs/`，自定义目录需直接调用脚本：
+
+```shell
+python3 scripts/dump_latency.py -in run.logs/example/in_cycle \
+  -out run.logs/example/out_cycle -o run.logs/example/latency.csv
+```
 
 ## 输出结果说明
 

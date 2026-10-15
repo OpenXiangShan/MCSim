@@ -28,6 +28,8 @@ For installation, compilation, and running instructions, please refer to the [MC
 
 More documentation about MCSim can be found in the `docs/` directory.
 
+See the [GitHub v1.1 release notes (Chinese draft)](CHANGELOG.md) for changes since v1.0 and the version mapping between repositories.
+
 ## LICENSE
 
 Copyright © 2020-2026 Institute of Computing Technology, Chinese Academy of Sciences.

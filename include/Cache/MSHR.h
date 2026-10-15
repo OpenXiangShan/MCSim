@@ -28,13 +28,16 @@
 
 struct MSHREntry {
     MappedTransaction t;
+    size_t way;
     enum class State {
         AWAITING_ISSUE,   // wait for request to be ISSUED
         REQUEST_ISSUED   // issued but not completed
     } state;
     std::list<MappedTransaction> merged_requests;   // requests with the same addr
-
-    MSHREntry(MappedTransaction t) : state(State::AWAITING_ISSUE), t(t), merged_requests() {}
+    MSHREntry(MappedTransaction t, size_t way)
+        : state(State::AWAITING_ISSUE), t(t), way(way), merged_requests() {}
+    MSHREntry(MappedTransaction t)
+        : state(State::AWAITING_ISSUE), t(t), merged_requests() {}
 };
 
 class MSHR {
@@ -55,7 +58,7 @@ public:
     }
     std::list<MSHREntry>::iterator get_mshr_entry(MappedTransaction t);
     std::pair<MappedTransaction, bool> get_unissued_request();
-    bool add_request(MappedTransaction t);
+    bool add_request(MappedTransaction t, size_t way);
     void remove_request(MappedTransaction t);   // undo add request
     void issue_request(MappedTransaction t);   // t has been issued
     void finish_request(MappedTransaction t);   // t has been completed

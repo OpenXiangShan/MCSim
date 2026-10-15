@@ -40,11 +40,19 @@ class StaticVirtualChannel {
             public:
                 uint64_t rob_full;
                 uint64_t total_latency, read_count;
+                uint64_t total_cache_hit_latency, cache_read_hit_count;
+                uint64_t total_cache_miss_latency, cache_read_miss_count;
+                std::map<int, int> latency_distribution;
+                std::map<std::uint64_t, std::uint64_t> info_token_addr_map;
+                std::map<std::uint64_t, bool> info_token_is_hit_map;
+                std::map<std::uint64_t, bool> info_token_is_miss_map;
+                unsigned int granularity = 10;   // granularity of latency distribution
         } stats;
         StaticVirtualChannel(size_t tok_cap);
-        void put_back(ID_TYPE id, TOKEN_TYPE token, uint64_t exp_rdback_time);
+        void put_back(ID_TYPE id, TOKEN_TYPE token, uint64_t exp_rdback_time, CallerType caller);
+        bool peekToken(AxiTransaction &at);
         bool addTrans(AxiTransaction &at);
-        void step(uint64_t cycles, uint64_t &next_valid_rd_time, IdAllocator *ia, Log *log);
+        void step(uint64_t cycles, uint64_t &next_valid_rd_time, IdAllocator *ia, Log *log, int channel_id);
         bool all_done() const;
     private:
         size_t vc_id(ID_TYPE id);   // hash from id to vc_id
@@ -55,10 +63,14 @@ class DynamicVirtualChannel {
             public:
                 uint64_t rob_full, max_rob_size;
                 uint64_t total_latency, read_count;
+                uint64_t total_cache_hit_latency, cache_read_hit_count;
+                uint64_t total_cache_miss_latency, cache_read_miss_count;   // TODO: dynamic vc stats cache_hit_latency
+                std::map<int, int> latency_distribution;
+                unsigned int granularity = 10;   // granularity of latency distribution
         } stats;
-        void put_back(ID_TYPE id, TOKEN_TYPE token, uint64_t exp_rdback_time);
+        void put_back(ID_TYPE id, TOKEN_TYPE token, uint64_t exp_rdback_time, CallerType caller);
         bool addTrans(AxiTransaction &at);
-        void step(uint64_t cycles, uint64_t &next_valid_rd_time, IdAllocator *ia, Log *log);
+        void step(uint64_t cycles, uint64_t &next_valid_rd_time, IdAllocator *ia, Log *log, int channel_id);
         bool all_done() const;
         DynamicVirtualChannel();
     private:

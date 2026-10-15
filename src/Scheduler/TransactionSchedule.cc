@@ -22,9 +22,36 @@
 #include "AXI2UI/AXI2UI.h"
 #include <iostream>
 #include "utils/log.h"
-TransactionSchedule::TransactionSchedule(): scg(scg), grant_read(true), rw_switch_cnt(0), rhold(0), whold(0), bank_free(all_bank_num, true)
+
+namespace {
+constexpr bool PREFER_FILTER = true;
+constexpr bool PREFER_CACHE = false;
+constexpr bool PREFER_READ = true;
+constexpr bool PREFER_WRITE = false;
+} // namespace
+
+static int get_idx(const MappedTransaction &t);
+
+int TransactionSchedule::arb_input_index(ArbInput input)
 {
-    switch (station_org) {
+    return static_cast<int>(input);
+}
+
+TransactionSchedule::ArbInput TransactionSchedule::get_arb_input(const MappedTransaction &trans, CallerType caller)
+{
+    bool from_cache = caller == CallerType::CACHE_MISS || caller == CallerType::CACHE_WRITEBACK;
+    if (from_cache) {
+        return trans.is_read ? TransactionSchedule::ArbInput::CACHE_RD : TransactionSchedule::ArbInput::CACHE_WR;
+    }
+    return trans.is_read ? TransactionSchedule::ArbInput::FILTER_RD : TransactionSchedule::ArbInput::FILTER_WR;
+}
+
+TransactionSchedule::TransactionSchedule(): grant_read(gr_delay, 0), rw_switch_cnt(0), rhold(0), whold(0), scg(nullptr), log(nullptr)
+{
+    for (int i = 0; i <= gr_delay; i++) {
+        grant_read[i - gr_delay] = true;
+    }
+    switch (SchedulerConfig::station_org) {
         case StationOrg::SINGLE:
             station_num = 1;
             break;
@@ -32,27 +59,33 @@ TransactionSchedule::TransactionSchedule(): scg(scg), grant_read(true), rw_switc
             station_num = all_bank_num;
             break;
         case StationOrg::PER_BG:
-            station_num = bg_num;
+            station_num = rank_num * bg_num;
             break;
         default:
             // Handle unexpected cases if necessary
             assert(0);
             break;
     }
-    last_rd.resize(station_num, false);
     transQ.reserve(station_num);
+    arb_inputs.resize(station_num);
+    arb_fired.resize(station_num, false);
+    filter_fired.resize(station_num, false);
+    cache_fired.resize(station_num, false);
+    fc_prefer_filter.resize(station_num, PREFER_CACHE);
+    filter_prefer_read.resize(station_num, PREFER_WRITE);
+    cache_prefer_read.resize(station_num, PREFER_WRITE);
+    filter_hold_prefer.resize(station_num, HoldPrefer::NONE);
+    cache_hold_prefer.resize(station_num, HoldPrefer::NONE);
     int queue_per_station = all_bank_num / station_num;
-    int rsize = rstation_size / station_num;
-    int wsize = wstation_size / station_num;
     for (int i = 0; i < all_bank_num; ++i) {
         bank_free[i] = true;
     }
     bool *bf = &bank_free[0];
     for (int i = 0; i < station_num; ++i) {
-        transQ.emplace_back(scheduler_queue_size);
+        transQ.emplace_back(SchedulerConfig::scheduler_queue_size);
 
-        rStation.emplace_back(rsize, 3, rsize - 2);
-        wStation.emplace_back(wsize, 2, wsize);
+        rStation.emplace_back(SchedulerConfig::rstation_size, 3, SchedulerConfig::rstation_size - 2);
+        wStation.emplace_back(SchedulerConfig::wstation_size, 2, SchedulerConfig::wstation_size);
         // Configure the last added stations
         auto &rStationBack = rStation.back();
         auto &wStationBack = wStation.back();
@@ -83,6 +116,8 @@ void TransactionSchedule::step()
         w.step();
     }
 
+    dispatch_pending_inputs();
+
     for (int i = 0; i < station_num; ++i) {
         if (!transQ[i].empty()) {
             auto &cmd = transQ[i].front();
@@ -96,25 +131,184 @@ void TransactionSchedule::step()
             }
         }
     }
+
+    update_dispatcher_idle_holds();
+    reset_dispatcher_cycle_state();
+}
+
+void TransactionSchedule::reset_dispatcher_cycle_state()
+{
+    std::fill(arb_fired.begin(), arb_fired.end(), false);
+    std::fill(filter_fired.begin(), filter_fired.end(), false);
+    std::fill(cache_fired.begin(), cache_fired.end(), false);
+}
+
+void TransactionSchedule::update_dispatcher_idle_holds()
+{
+    for (int i = 0; i < station_num; ++i) {
+        const auto &inputs = arb_inputs[i];
+        if (!filter_fired[i] && filter_hold_prefer[i] == HoldPrefer::NONE) {
+            if (!inputs[arb_input_index(ArbInput::FILTER_RD)].empty()) {
+                filter_hold_prefer[i] = HoldPrefer::READ;
+            } else if (!inputs[arb_input_index(ArbInput::FILTER_WR)].empty()) {
+                filter_hold_prefer[i] = HoldPrefer::WRITE;
+            }
+        }
+
+        if (!cache_fired[i] && cache_hold_prefer[i] == HoldPrefer::NONE) {
+            if (!inputs[arb_input_index(ArbInput::CACHE_RD)].empty()) {
+                cache_hold_prefer[i] = HoldPrefer::READ;
+            } else if (!inputs[arb_input_index(ArbInput::CACHE_WR)].empty()) {
+                cache_hold_prefer[i] = HoldPrefer::WRITE;
+            }
+        }
+    }
+}
+
+int TransactionSchedule::choose_dispatcher_input(int idx) const
+{
+    const auto &inputs = arb_inputs[idx];
+    auto valid = [&](ArbInput input) {
+        return !inputs[arb_input_index(input)].empty();
+    };
+
+    int valid_count = 0;
+    int only_valid = -1;
+    for (int i = 0; i < arb_input_num; ++i) {
+        if (!inputs[i].empty()) {
+            valid_count++;
+            only_valid = i;
+        }
+    }
+
+    if (valid_count == 0) {
+        return -1;
+    }
+    if (valid_count == 1) {
+        return only_valid;
+    }
+
+    auto choose_rw = [](bool rd_valid, HoldPrefer hold_prefer, bool rw_prefer_read,
+                        ArbInput rd_input, ArbInput wr_input) {
+        if (hold_prefer == HoldPrefer::READ) {
+            return arb_input_index(rd_input);
+        }
+        if (hold_prefer == HoldPrefer::WRITE) {
+            return arb_input_index(wr_input);
+        }
+        return (rw_prefer_read == PREFER_READ && rd_valid) ?
+            arb_input_index(rd_input) : arb_input_index(wr_input);
+    };
+
+    bool filter_valid = valid(ArbInput::FILTER_RD) || valid(ArbInput::FILTER_WR);
+    bool cache_valid = valid(ArbInput::CACHE_RD) || valid(ArbInput::CACHE_WR);
+
+    if (fc_prefer_filter[idx] == PREFER_FILTER) {
+        if (filter_valid) {
+            return choose_rw(valid(ArbInput::FILTER_RD), filter_hold_prefer[idx], filter_prefer_read[idx],
+                             ArbInput::FILTER_RD, ArbInput::FILTER_WR);
+        }
+        return choose_rw(valid(ArbInput::CACHE_RD), cache_hold_prefer[idx], cache_prefer_read[idx],
+                         ArbInput::CACHE_RD, ArbInput::CACHE_WR);
+    }
+
+    if (cache_valid) {
+        return choose_rw(valid(ArbInput::CACHE_RD), cache_hold_prefer[idx], cache_prefer_read[idx],
+                         ArbInput::CACHE_RD, ArbInput::CACHE_WR);
+    }
+    return choose_rw(valid(ArbInput::FILTER_RD), filter_hold_prefer[idx], filter_prefer_read[idx],
+                     ArbInput::FILTER_RD, ArbInput::FILTER_WR);
+}
+
+void TransactionSchedule::update_dispatcher_prefer(int idx, ArbInput input)
+{
+    auto valid = [&](ArbInput in) {
+        return !arb_inputs[idx][arb_input_index(in)].empty();
+    };
+
+    switch (input) {
+        case ArbInput::FILTER_RD:
+            filter_fired[idx] = true;
+            fc_prefer_filter[idx] = PREFER_CACHE;
+            filter_prefer_read[idx] = PREFER_WRITE;
+            filter_hold_prefer[idx] = valid(ArbInput::FILTER_WR) ? HoldPrefer::WRITE : HoldPrefer::NONE;
+            break;
+        case ArbInput::FILTER_WR:
+            filter_fired[idx] = true;
+            fc_prefer_filter[idx] = PREFER_CACHE;
+            filter_prefer_read[idx] = PREFER_READ;
+            filter_hold_prefer[idx] = valid(ArbInput::FILTER_RD) ? HoldPrefer::READ : HoldPrefer::NONE;
+            break;
+        case ArbInput::CACHE_RD:
+            cache_fired[idx] = true;
+            fc_prefer_filter[idx] = PREFER_FILTER;
+            cache_prefer_read[idx] = PREFER_WRITE;
+            cache_hold_prefer[idx] = valid(ArbInput::CACHE_WR) ? HoldPrefer::WRITE : HoldPrefer::NONE;
+            break;
+        case ArbInput::CACHE_WR:
+            cache_fired[idx] = true;
+            fc_prefer_filter[idx] = PREFER_FILTER;
+            cache_prefer_read[idx] = PREFER_READ;
+            cache_hold_prefer[idx] = valid(ArbInput::CACHE_RD) ? HoldPrefer::READ : HoldPrefer::NONE;
+            break;
+    }
+}
+
+void TransactionSchedule::dispatch_pending_inputs()
+{
+    for (int idx = 0; idx < station_num; ++idx) {
+        if (transQ[idx].full()) {
+            continue;
+        }
+
+        int chosen = choose_dispatcher_input(idx);
+        if (chosen < 0) {
+            continue;
+        }
+
+        auto &slot = arb_inputs[idx][chosen];
+        bool added = transQ[idx].push(slot.front());
+        assert(added);
+        update_dispatcher_prefer(idx, static_cast<ArbInput>(chosen));
+        slot.pop_front();
+        arb_fired[idx] = true;
+    }
+}
+
+bool TransactionSchedule::try_add_to_dispatcher(const MappedTransaction &trans, ArbInput input)
+{
+    int idx = get_idx(trans);
+    int input_idx = arb_input_index(input);
+    auto &input_q = arb_inputs[idx][input_idx];
+
+    if (input_q.size() >= arb_input_depth) {
+        return false;
+    }
+
+    input_q.push_back(trans);
+    return true;
 }
 
 void TransactionSchedule::rw_schedule()
 {
-    // postpone by two cycles, next_grant_read[1] -> next_grant_read[0] -> grand_read
-    static bool next_grant_read[2] = {true, true};
-    for (auto &r : rStation) {
-        r.set_grant(next_grant_read[0]);
-    }
-    for (auto &w : wStation) {
-        w.set_grant(!next_grant_read[0]);
-    }
-
-    if (grant_read != next_grant_read[0]) {
+    assert(gr_delay > 0);
+    if (grant_read[-1] != grant_read[0]) {
         rw_switch_cnt++;
     }
 
-    grant_read = next_grant_read[0];
-    next_grant_read[0] = next_grant_read[1];
+    grant_read.advance();
+
+    auto grant_read_use = grant_read.getWire(-gr_delay);
+    auto grant_read_assign = grant_read.getWire(0);
+    *grant_read_assign = *grant_read_use;
+
+    for (auto &r : rStation) {
+        r.set_grant(*grant_read_use);
+    }
+    for (auto &w : wStation) {
+        w.set_grant(!*grant_read_use);
+    }
+
 
     bool rconflict = std::any_of(rStation.begin(), rStation.end(), [](const auto &station) {
         return station.is_conflict();
@@ -124,22 +318,32 @@ void TransactionSchedule::rw_schedule()
     });
 
     if (rconflict) {
-        next_grant_read[1] = true;
+        *grant_read_assign = true;
     } else if (wconflict) { // wconflict && !rconflict
-        next_grant_read[1] = false;
+        *grant_read_assign = false;
     } else { // !rconflict && !wconflict
-        if (grant_read) {
+        if (*grant_read_use) {
             if (rhold > 27) {
+                bool rall_empty = std::all_of(rStation.begin(), rStation.end(), [](const auto &station) {
+                    return station.empty();
+                });
+                bool wall_empty = std::all_of(wStation.begin(), wStation.end(), [](const auto &station) {
+                    return station.empty();
+                });
                 bool walmost_full = std::any_of(wStation.begin(), wStation.end(), [](const auto &station) {
                     return station.almost_full();
                 });
-                next_grant_read[1] = !walmost_full;
+                if (SchedulerConfig::switch_to_w_when_r_empty) {
+                    *grant_read_assign = !(walmost_full || (rall_empty && !wall_empty));
+                } else {
+                    *grant_read_assign = !walmost_full;
+                }
             }
         } else {
-            if (whold > 81 - 1) {
+            if (whold > 81) {
             // if (whold > 256) {
             // if (false) {
-                next_grant_read[1] = true;
+                *grant_read_assign = true;
             } else if (whold > 16) {
                 bool walmost_empty = std::all_of(wStation.begin(), wStation.end(), [](const auto &station) {
                     return station.almost_empty();
@@ -147,12 +351,12 @@ void TransactionSchedule::rw_schedule()
                 // bool ralmost_full = std::any_of(rstation.begin(), rstation.end(), [](const auto &station) {
                 //     return station.almost_full();
                 // });
-                next_grant_read[1] = walmost_empty; //|| ralmost_full;
+                *grant_read_assign = walmost_empty; //|| ralmost_full;
             }
         }
     }
 
-    if (grant_read) {
+    if (*grant_read_use) {
         rhold += 1;
         whold = 0;
     } else {
@@ -161,17 +365,25 @@ void TransactionSchedule::rw_schedule()
     }
 }
 
-size_t TransactionSchedule::get_num(size_t bank_id)
+size_t TransactionSchedule::get_num(size_t bank_id) const
 {
-    int st_idx = bank_id % station_num;
+    int st_idx = bank_id / (all_bank_num / station_num);
     size_t rnum = rStation[st_idx].get_num(bank_id);
     size_t wnum = wStation[st_idx].get_num(bank_id);
 
-    if (grant_read) {
+    if (grant_read[-gr_delay]) {
         return rnum;
     } else {
         return wnum;
     }
+}
+
+bool TransactionSchedule::has_page_hit(size_t bank_id, size_t row) const
+{
+    int st_idx = bank_id / (all_bank_num / station_num);
+
+    return rStation[st_idx].has_page_hit(bank_id, row) ||
+           wStation[st_idx].has_page_hit(bank_id, row);
 }
 
 void TransactionSchedule::set_scg(SdramCommandGen *scg)
@@ -187,13 +399,13 @@ void TransactionSchedule::set_scg(SdramCommandGen *scg)
 
 static int get_idx(const MappedTransaction &t)
 {
-    switch (station_org) {
+    switch (SchedulerConfig::station_org) {
         case StationOrg::SINGLE:
             return 0;
         case StationOrg::PER_BANK:
-            return t.mapped_addr.bg * bank_per_bg + t.mapped_addr.bank;
+            return (t.mapped_addr.rank * bg_num + t.mapped_addr.bg) * bank_per_bg + t.mapped_addr.bank;
         case StationOrg::PER_BG:
-            return t.mapped_addr.bg;
+            return t.mapped_addr.rank * bg_num + t.mapped_addr.bg;
         default:
             // Handle unexpected cases if necessary
             assert(0);
@@ -203,40 +415,27 @@ static int get_idx(const MappedTransaction &t)
 
 rw_trans_type TransactionSchedule::addTrans(const MappedTransaction &r, const MappedTransaction &w, rw_trans_type type, CallerType caller)
 {
-    int ridx = get_idx(r);
-    int widx = get_idx(w);
-
     bool accept_rd = false;
     bool accept_wr = false;
 
-    // Helper function to attempt adding a transaction to the queue
-    auto tryAddTransaction = [&](const MappedTransaction &trans, int idx, bool &accept) {
-        accept = transQ[idx].push(trans);
-    };
-
     switch (type) {
         case RD_ONLY:
-            tryAddTransaction(r, ridx, accept_rd);
+            assert(r.is_read);
+            accept_rd = try_add_to_dispatcher(r, get_arb_input(r, caller));
             break;
         case WR_ONLY:
-            tryAddTransaction(w, widx, accept_wr);
+            assert(!w.is_read);
+            accept_wr = try_add_to_dispatcher(w, get_arb_input(w, caller));
             break;
         case RD_WR:
-            if (last_rd[ridx]) {
-                tryAddTransaction(w, widx, accept_wr);
-            } else {
-                tryAddTransaction(r, ridx, accept_rd);
-            }
+            assert(r.is_read && !w.is_read);
+            accept_rd = try_add_to_dispatcher(r, get_arb_input(r, caller));
+            accept_wr = try_add_to_dispatcher(w, get_arb_input(w, caller));
             break;
     }
 
-    // Update last_rd based on accepted transactions
     if (accept_rd) {
-        last_rd[ridx] = true;
         log->in_scheduler(r);
-    }
-    if (accept_wr) {
-        last_rd[ridx] = false;
     }
 
     // Return the appropriate transaction type
@@ -277,4 +476,37 @@ void TransactionSchedule::statistics() const
     // Output the 
     std::cout << "| total conflict: " << total_conflict << std::endl;
     std::cout << "| rw_switch_cnt: " << rw_switch_cnt << std::endl;
+}
+
+void TransactionSchedule::resetStats()
+{
+    rw_switch_cnt = 0;
+    // 重置所有 rStation 和 wStation 的 conflict_count
+    for (auto &station : rStation) {
+        station.conflict_count = 0;
+    }
+    for (auto &station : wStation) {
+        station.conflict_count = 0;
+    }
+}
+
+bool TransactionSchedule::all_done() const
+{
+    // transQ and rwStation are empty
+    bool transQ_empty = std::all_of(transQ.begin(), transQ.end(), [](const auto &queue) {
+        return queue.empty();
+    });
+    bool arb_empty = std::all_of(arb_inputs.begin(), arb_inputs.end(), [](const auto &inputs) {
+        return std::all_of(inputs.begin(), inputs.end(), [](const auto &input_q) {
+            return input_q.empty();
+        });
+    });
+    bool rStation_empty = std::all_of(rStation.begin(), rStation.end(), [](const auto &station) {
+        return station.empty();
+    });
+    bool wStation_empty = std::all_of(wStation.begin(), wStation.end(), [](const auto &station) {
+        return station.empty();
+    });
+    
+    return arb_empty && transQ_empty && rStation_empty && wStation_empty;
 }

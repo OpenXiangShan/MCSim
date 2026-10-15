@@ -23,7 +23,7 @@
 class TimingCheck {
 public:
     void step(); // update timing based on dficmd
-    TimingCheck();
+    TimingCheck(const TIME_TYPE &cycles);
     bool check_act(const MappedTransaction &act) const;
     bool check_pre(const MappedTransaction &pre) const;
     std::pair<CASFail, TIME_TYPE> check_cas(const MappedTransaction &cas) const;
@@ -31,7 +31,7 @@ public:
     void set_phase(const DFICommand *phase0, const DFICommand *phase1);
 private:
     const DFICommand *phase0, *phase1;
-    TIME_TYPE cycles;
+    const TIME_TYPE &cycles;
     TIME_TYPE tRTW_exp;
     TIME_TYPE tRTPA_exp, tRASA_exp, tWRA_exp;
     std::vector<TIME_TYPE> tCCD_L_exp; // per bg

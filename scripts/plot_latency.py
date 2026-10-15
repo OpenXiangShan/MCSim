@@ -14,131 +14,132 @@
 # See the Mulan PSL v2 for more details.
 
 import csv
+import sys
+from collections import Counter, defaultdict
+
 import matplotlib.pyplot as plt
 import numpy as np
-from collections import defaultdict
-import sys
 
-def read_csv_date(filename):
-    """Read CSV data and return all_latencies and module_data"""
-    all_latencies = []
-    module_data = defaultdict(list)
-    module_names = [
-        'in_axi_latency', 'in_filter_latency', 'in_addrmap_latency',
-        'in_scheduler_latency', 'in_scg_out_filter_latency', 'out_axi_latency'
-    ]
-    
+NEW_STAGE_COLUMNS = [
+    'in_axi_latency', 'in_filter_latency', 'in_addrmap_latency',
+    'cache_hit_latency', 'cache_miss_refill_latency', 'cache_to_rob',
+    'in_scheduler_latency', 'inout_scg_latency', 'out_axi_latency',
+]
+LEGACY_STAGE_COLUMNS = NEW_STAGE_COLUMNS
+
+
+def to_int(value):
+    if value is None or value == '' or value == 'None':
+        return None
+    return int(value)
+
+
+def read_csv_data(filename):
     try:
         with open(filename, 'r') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                # Convert values to integers
-                all_latency_val = int(row['all_latency'])
-                all_latencies.append(all_latency_val)
-                
-                # Store module latencies for this record
-                for module in module_names:
-                    module_data[module].append(int(row[module]))
+            rows = list(csv.DictReader(csvfile))
     except FileNotFoundError:
         print(f"Error: File '{filename}' not found.")
         sys.exit(1)
     except Exception as e:
-        print(f"Error reading file: {e}")
+        print(f'Error reading file: {e}')
         sys.exit(1)
-        
-    return all_latencies, module_data, module_names
 
-def calculate_averages(all_latencies, module_data, module_names):
-    """Calculate average latencies"""
-    avg_all_latency = np.mean(all_latencies)
-    avg_module_latencies = {module: np.mean(module_data[module]) for module in module_names}
-    
-    return avg_all_latency, avg_module_latencies
+    if not rows:
+        print('Error: CSV has no rows.')
+        sys.exit(1)
 
-def plot_latency_distribution(all_latencies):
-    """Plot latency distribution using plt.bar with a dictionary of counts"""
-    # Count occurrences of each latency value
-    latency_counts = {}
-    for latency in all_latencies:
-        if latency in latency_counts:
-            latency_counts[latency] += 1
-        else:
-            latency_counts[latency] = 1
-            
-    # Sort latencies for plotting
-    sorted_latencies = sorted(latency_counts.keys())
-    counts = [latency_counts[lat] for lat in sorted_latencies]
-    
-    # Create first figure: the bar plot
+    stage_columns = [c for c in NEW_STAGE_COLUMNS if c in rows[0]]
+    if not stage_columns:
+        stage_columns = [c for c in LEGACY_STAGE_COLUMNS if c in rows[0]]
+    if not stage_columns:
+        print('Error: no known latency stage columns found.')
+        sys.exit(1)
+
+    all_latencies = []
+    path_latencies = defaultdict(list)
+    stage_data = {stage: [] for stage in stage_columns}
+    path_stage_data = defaultdict(lambda: {stage: [] for stage in stage_columns})
+
+    for row in rows:
+        total = to_int(row.get('all_latency'))
+        if total is None:
+            continue
+        path = row.get('path_type') or 'all'
+        all_latencies.append(total)
+        path_latencies[path].append(total)
+        for stage in stage_columns:
+            value = to_int(row.get(stage))
+            value = 0 if value is None else value
+            stage_data[stage].append(value)
+            path_stage_data[path][stage].append(value)
+
+    return all_latencies, path_latencies, stage_data, path_stage_data, stage_columns
+
+
+def print_averages(all_latencies, path_latencies, stage_data, stage_columns):
+    print('Average Latencies:')
+    print(f"All Latency: {np.mean(all_latencies):.2f}" if all_latencies else 'All Latency: N/A')
+    for path, values in sorted(path_latencies.items()):
+        print(f"{path}: count={len(values)}, avg={np.mean(values):.2f}")
+    print('\nAverage Stage Latencies:')
+    for stage in stage_columns:
+        print(f"{stage}: {np.mean(stage_data[stage]):.2f}")
+
+
+def plot_latency_distribution(path_latencies):
     plt.figure(1)
-    plt.bar(sorted_latencies, counts, alpha=0.7)
+    for path, values in sorted(path_latencies.items()):
+        counts = Counter(values)
+        xs = sorted(counts)
+        ys = [counts[x] for x in xs]
+        plt.step(xs, ys, where='mid', label=path, alpha=0.85)
     plt.xlabel('Latency')
     plt.ylabel('Number of Records')
-    plt.title('Latency Distribution')
+    plt.title('Latency Distribution by Path')
+    plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    
-def plot_module_composition(all_latencies, module_data, module_names):
-    """Plot module latency composition (Figure 2)"""
-    # Group records by all_latency value
-    latency_groups = defaultdict(list)
-    for i, latency in enumerate(all_latencies):
-        latency_groups[latency].append(i)
-    
-    # Calculate average module percentages for each latency value
-    latencies = sorted(latency_groups.keys())
-    module_percentages = {module: [] for module in module_names}
-    
-    for latency in latencies:
-        indices = latency_groups[latency]
-        for module in module_names:
-            # Calculate average percentage for this module at this latency
-            avg_module_val = np.mean([module_data[module][i] for i in indices])
-            module_percentages[module].append(avg_module_val / latency * 100)
-            
-    # Create second figure: the stacked bar plot
+
+
+def plot_path_composition(path_stage_data, stage_columns):
+    paths = sorted(path_stage_data)
+    if not paths:
+        return
+
     plt.figure(2)
-    bottom = np.zeros(len(latencies))
-    
-    for module in module_names:
-        plt.bar(latencies, module_percentages[module], bottom=bottom, label=module)
-        bottom += np.array(module_percentages[module])
-        
-    plt.xlabel('Latency')
-    plt.ylabel('Percentage of Latency (%)')
-    plt.title('Composition of Latency by Module')
+    bottom = np.zeros(len(paths))
+    x = np.arange(len(paths))
+    for stage in stage_columns:
+        values = np.array([
+            np.mean(path_stage_data[path][stage]) if path_stage_data[path][stage] else 0
+            for path in paths
+        ])
+        if np.all(values == 0):
+            continue
+        plt.bar(x, values, bottom=bottom, label=stage)
+        bottom += values
+
+    plt.xticks(x, paths, rotation=25, ha='right')
+    plt.ylabel('Average Latency (cycles)')
+    plt.title('Average Latency Composition by Path')
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.grid(True, alpha=0.3)
+    plt.grid(True, axis='y', alpha=0.3)
     plt.tight_layout()
-    
+
+
 def main():
-    # Check if filename is provided as argument
     if len(sys.argv) != 2:
         print('Usage: python plot_latency.py <filename>')
         sys.exit(1)
-    
-    filename = sys.argv[1]
-    
-    # Read data from CSV
-    all_latencies, module_data, module_names = read_csv_date(filename)
-    
-    # Calculate averages
-    avg_all_latency, avg_module_latencies = calculate_averages(all_latencies, module_data, module_names)
-    
-    # Print average latencies
-    print("Average Latencies:")
-    print(f"All Latency: {avg_all_latency:.2f}")
-    for module, avg in avg_module_latencies.items():
-        print(f"{module}: {avg:.2f}")
-        
-    # Plot figures
-    plot_latency_distribution(all_latencies)
-    plot_module_composition(all_latencies, module_data, module_names)
-    
-    # Show both figures
-    # plt.show()
+
+    all_latencies, path_latencies, stage_data, path_stage_data, stage_columns = read_csv_data(sys.argv[1])
+    print_averages(all_latencies, path_latencies, stage_data, stage_columns)
+    plot_latency_distribution(path_latencies)
+    plot_path_composition(path_stage_data, stage_columns)
     plt.show(block=True)
-    
-if __name__ == "__main__":
+
+
+if __name__ == '__main__':
     plt.ioff()
     main()

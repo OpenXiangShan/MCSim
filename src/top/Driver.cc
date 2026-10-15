@@ -15,6 +15,9 @@
 ***************************************************************************************/
 
 #include "top/Driver.h"
+#include "top/DepTracker.h"
+#include "top/Controller.h"
+#include "config.h"
 #include <iostream>
 #include <cassert>
 bool RandomDriver::next_transaction()
@@ -25,6 +28,10 @@ bool RandomDriver::next_transaction()
     st.is_read = (rng() & 0xfffff)  < read_ratio;
     st.addr = rng() & 0x3ffffffff;   // 34 bits
     st.id = st.is_read ? ia->allocate_rid() : ia->allocate_wid();
+    stats.max_rid = st.is_read ? std::max(stats.max_rid, st.id) : stats.max_rid;
+    if (NEW_TRACE) {
+        st.dependency = rng() % 64;
+    }
     ++generated;
     return true;
 }
@@ -50,7 +57,10 @@ bool TraceDriver::next_transaction()
     if (trace.fail()) {
         return false;
     }
-    st.id = st.is_read ? ia->allocate_rid() : ia->allocate_wid();
+    if (!NEW_TRACE) {
+        st.id = st.is_read ? ia->allocate_rid() : ia->allocate_wid();
+    }
+    stats.max_rid = st.is_read ? std::max(stats.max_rid, st.id) : stats.max_rid;
     return true;
 }
 
@@ -90,15 +100,49 @@ ID_TYPE IdAllocator::allocate_wid()
     return next_wid++;
 }
 
-void IdAllocator::release_rid(ID_TYPE rid)
+void IdAllocator::release_rid(ID_TYPE rid, int channel)
 {
+    // 中文说明：先通知外部（例如 gem5）该读请求已完成。
+    // 注意：这个回调不应改变 mcsim 的内部资源回收逻辑。
+    if (on_read_complete) {
+        on_read_complete(rid);
+    }
+
+    if (NEW_TRACE) {
+        // 中文说明：driver 可能为空（gem5 嵌入模式下不使用 Driver/DepTracker）。
+        if (driver && driver->dep_tracker && controller) {
+            driver->dep_tracker->mark_returned(rid, true, channel, controller->get_cycles());
+        }
+    }
+
+    // if NEW_TRACE and driver is TraceDriver, don't need to release
+    if (NEW_TRACE && driver && dynamic_cast<TraceDriver*>(driver)) {
+        return;
+    }
+
     assert(rid < next_rid);
     assert(free_rids.find(rid) == free_rids.end());
     free_rids.insert(rid);
 }
 
-void IdAllocator::release_wid(ID_TYPE wid)
+void IdAllocator::release_wid(ID_TYPE wid, int channel)
 {
+    // 中文说明：先通知外部（例如 gem5）该写请求已完成。
+    if (on_write_complete) {
+        on_write_complete(wid);
+    }
+
+    if (NEW_TRACE) {
+        if (driver && driver->dep_tracker && controller) {
+            driver->dep_tracker->mark_returned(wid, false, channel, controller->get_cycles());
+        }
+    }
+
+    // if NEW_TRACE and driver is TraceDriver, don't need to release
+    if (NEW_TRACE && driver && dynamic_cast<TraceDriver*>(driver)) {
+        return;
+    }
+
     assert(wid < next_wid);
     assert(free_wids.find(wid) == free_wids.end());
     free_wids.insert(wid);

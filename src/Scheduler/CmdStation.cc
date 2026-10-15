@@ -21,7 +21,7 @@
 CmdStation::CmdStation(int cap, int l_water, int h_water): size(0), grant(false), capacity(cap),
     l_water(l_water), h_water(h_water), conflict_count(0), conflict(false), conflict_slot(nullptr)
 {
-    switch (station_org) {
+    switch (SchedulerConfig::station_org) {
         case StationOrg::SINGLE:
             queue_num = all_bank_num;
             break;
@@ -80,39 +80,32 @@ bool CmdStation::empty() const
     return size == 0;
 }
 
-size_t CmdStation::get_num(size_t bank_id)
+size_t CmdStation::get_num(size_t bank_id) const
 {
-    int queue_idx;
-    switch (station_org) {
-        case StationOrg::SINGLE:
-            queue_idx = bank_id;
-            break;
-        case StationOrg::PER_BANK:
-            queue_idx = 0;
-            break;
-        case StationOrg::PER_BG:
-            queue_idx = bank_id % bank_per_bg;
-            break;
-        default:
-            // Handle unexpected cases if necessary
-            assert(0);
-            break;
-    }
+    int queue_idx = get_queue_idx(bank_id);
     size_t num = 0;
     for (auto item = valid_list[queue_idx].next; item != nullptr; item = item->next) {
         num++;
     }
     return num;
-
-
-    // return size;
 }
 
-static inline int get_queue_idx(const MappedTransaction &trans)
+bool CmdStation::has_page_hit(size_t bank_id, size_t row) const
 {
-    switch (station_org) {
+    int queue_idx = get_queue_idx(bank_id);
+    for (auto item = valid_list[queue_idx].next; item != nullptr; item = item->next) {
+        if (item->ts.mapped_addr.row == row) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int CmdStation::get_queue_idx(const MappedTransaction &trans) const
+{
+    switch (SchedulerConfig::station_org) {
         case StationOrg::SINGLE:
-            return  trans.mapped_addr.bg * bank_per_bg + trans.mapped_addr.bank;
+            return (trans.mapped_addr.rank * bg_num + trans.mapped_addr.bg) * bank_per_bg + trans.mapped_addr.bank;
             break;
         case StationOrg::PER_BANK:
             return 0;
@@ -125,12 +118,29 @@ static inline int get_queue_idx(const MappedTransaction &trans)
             return 0;
             break;
     }
+}
 
+int CmdStation::get_queue_idx(const size_t bank_id) const
+{
+    switch (SchedulerConfig::station_org) {
+        case StationOrg::SINGLE:
+            return  bank_id;
+            break;
+        case StationOrg::PER_BANK:
+            return 0;
+        case StationOrg::PER_BG:
+            return  bank_id % bank_per_bg;
+            break;
+        default:
+            // Handle unexpected cases if necessary
+            assert(0);
+            return 0;
+            break;
+    }
 }
 
 bool CmdStation::check_conflict(const MappedTransaction &trans)
 {
-    // int bank_no = trans.mapped_addr.bg * bank_per_bg + trans.mapped_addr.bank;
     int queue_idx = get_queue_idx(trans);
 
     // return false; // ignore conflict
@@ -188,7 +198,7 @@ bool CmdStation::schedule_one(int queue_idx)
     }
 
 // fr-fcfs
-    if (schedule_policy == SchedulePolicy::FRFCFS)
+    if (SchedulerConfig::schedule_policy == SchedulePolicy::FRFCFS)
         for (auto item = valid_list[queue_idx].next; item != nullptr; item = item->next) {
             if (open_rows[queue_idx] == item->ts.mapped_addr.row) {
                 schedule_slot = item;
@@ -227,4 +237,8 @@ void CmdStation::step()
             free_list.next = schedule_slot;
         }
     }
+}
+
+bool CmdStation::is_conflict() const {
+    return conflict;
 }

@@ -23,6 +23,10 @@
 class TransactionSchedule;
 class Cache;
 class Log;
+
+// Declaration of calculate_channel for use in other modules (e.g., Controller, DepTracker)
+int calculate_channel(uint64_t addr);
+
 class AddrMap {
 private:
     FixedQueue<MappedTransaction> rTrans;

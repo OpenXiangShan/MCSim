@@ -41,7 +41,8 @@ public:
     bool almost_full() const;
     bool almost_empty() const;
     bool empty() const;
-    size_t get_num(size_t bank_id);   // get the number of cmds in CmdSt of specified bank
+    size_t get_num(size_t bank_id) const;   // get the number of cmds in CmdSt of specified bank
+    bool has_page_hit(size_t bank_id, size_t row) const;
     int conflict_count;
     SdramCommandGen *scg;
     bool *bank_free;
@@ -58,6 +59,8 @@ private:
     std::vector<uint32_t> open_rows;
     // std::bitset<all_bank_num> bank_conflict;
     std::vector<bool> bank_conflict;
+    int get_queue_idx(const MappedTransaction &trans) const;
+    int get_queue_idx(const size_t bank_id) const;
 };
 
 #endif // __CMDSTATION_H__

@@ -53,12 +53,18 @@ bool SdramCommandGen::addTrans(const MappedTransaction &trans)
 {
     int bg = trans.mapped_addr.bg;
     int bank = trans.mapped_addr.bank;
-    // dump scheduler to scg transaction
-    dump_as_scg_trans(trans, bg, bank);
-    bool accepted = req_gen[bg * bank_per_bg + bank].addTrans(trans);
+    int bank_id = (trans.mapped_addr.rank * bg_num + bg) * bank_per_bg + bank;
+    bool accepted = req_gen[bank_id].addTrans(trans);
+    
+    if (accepted) {
+        // dump scheduler to scg transaction
+        dump_as_scg_trans(trans, bg, bank);
+    }
+    
     if (trans.is_read && accepted) {
         log->in_scg(trans);
     }
+
     return accepted;
 }
 
@@ -78,26 +84,100 @@ void SdramCommandGen::statistics() const
     // std::cout << "idle_FAW: " << idle_FAW << std::endl;
     std::cout << "| all idle cycles: " << idle_ref_zq + idle_rs + idle_r2w + idle_w2r + \
         idle_w2wdr + idle_w2rdr + idle_r2rdr + idle_r2wdr + idle_bf + idle_empty << std::endl;
-    std::cout << "| act_cnt: " << act_cnt << std::endl;
+    std::cout << "| act_cnt: " << act_cnt << ", pre_cnt: " << pre_cnt << ", cas_cnt: " << cas_cnt << std::endl;
+    
+    // row hit/miss statistics
+    uint64_t total_row_hit = 0, total_row_miss = 0;
+    for (int i = 0; i < all_bank_num; ++i) {
+        total_row_hit += req_gen[i].stats.row_hit_cnt;
+        total_row_miss += req_gen[i].stats.row_miss_cnt;
+    }
+    double row_hit_rate = static_cast<float>(total_row_hit) / (total_row_hit + total_row_miss) * 100;
+    std::cout << "| total_access: " << total_row_hit + total_row_miss << ", total_row_hit: " << total_row_hit \
+              << " (" << row_hit_rate << "%)" << std::endl;
 }
 
+void SdramCommandGen::resetStats()
+{
+    idle_ref_zq = idle_rs = idle_r2w = idle_w2r = idle_bf = idle_empty = \
+        idle_FAW = act_cnt = pre_cnt = cas_cnt = idle_w2wdr = idle_w2rdr = idle_r2rdr = idle_r2wdr = 0;
+    
+    // 重置所有 RequestGenerator 的统计信息
+    for (auto &gen : req_gen) {
+        gen.stats.row_hit_cnt = 0;
+        gen.stats.row_miss_cnt = 0;
+    }
+}
 
 void SdramCommandGen::set_axi2ui(AXI2UI *axi2ui)
 {
     this->axi2ui = axi2ui;
 }
 
-SdramCommandGen::SdramCommandGen()
+SdramCommandGen::SdramCommandGen(const TIME_TYPE &cycles)
+    : cycles(cycles),
+      timing_check(cycles),
+      readback_queue(ScgConfig::read_back_queue_size)
 {
     for (int i = 0; i < all_bank_num; ++i) {
         req_gen.push_back(RequestGenerator());
+        req_gen[i].scg = this;
+        req_gen[i].bank_id = i;
     }
     timing_check.set_phase(&(phase0), &(phase1));
     last_act_no = -1, last_pre_no = -1, last_cas_no = -1;
     idle_ref_zq = idle_rs = idle_r2w = idle_w2r = idle_bf = idle_empty = \
-        idle_FAW = act_cnt = idle_w2wdr = idle_w2rdr = idle_r2rdr = idle_r2wdr = 0;
+        idle_FAW = act_cnt = pre_cnt = cas_cnt = idle_w2wdr = idle_w2rdr = idle_r2rdr = idle_r2wdr = 0;
     phase0.type = DFI_TYPE::NONE;
     phase1.type = DFI_TYPE::NONE;
+}
+
+void SdramCommandGen::enqueue_read_data_return(const MappedTransaction &trans)
+{
+    assert(trans.is_read);
+    bool queued = readback_queue.push(std::make_pair(trans, cycles + scg_cas_issue_to_dfi_data_delay));
+    assert(queued && "SCG read data return queue overflow");
+}
+
+void SdramCommandGen::drain_ready_cache_read_data()
+{
+    if (readback_queue.empty()) {
+        return;
+    }
+
+    const auto &entry = readback_queue.front();
+    if (entry.second > cycles || !entry.first.is_to_cache) {
+        return;
+    }
+
+    cache->returnFromScg(entry.first);
+    readback_queue.pop();
+}
+
+bool SdramCommandGen::hasReadyReadback() const
+{
+    if (readback_queue.empty()) {
+        return false;
+    }
+
+    const auto &entry = readback_queue.front();
+    return entry.second <= cycles && !entry.first.is_to_cache;
+}
+
+MappedTransaction SdramCommandGen::peekReadyReadback() const
+{
+    assert(hasReadyReadback());
+    return readback_queue.front().first;
+}
+
+void SdramCommandGen::commitReadyReadback()
+{
+    assert(hasReadyReadback());
+
+    const auto &entry = readback_queue.front();
+    const MappedTransaction &trans = entry.first;
+    axi2ui->put_back(trans.id, trans.token, CallerType::SCG);
+    readback_queue.pop();
 }
 
 RequestGenerator *SdramCommandGen::arb_act(bool &has_act, bool &has_act_req)
@@ -328,6 +408,8 @@ void SdramCommandGen::step()
     phase0.type = DFI_TYPE::NONE;
     phase1.type = DFI_TYPE::NONE;
 
+    drain_ready_cache_read_data();
+
 // arbitrate act
     bool has_act = false, has_act_req = false;
     RequestGenerator *gen_act = arb_act(has_act, has_act_req);
@@ -351,7 +433,7 @@ void SdramCommandGen::step()
             gen_cas->cas_resp = true;
             auto cas = gen_cas->transQ.front();
             dump_dfi_trans(cas);
-            scheduler->notify(cas.mapped_addr.bg * bank_per_bg + cas.mapped_addr.bank);
+            scheduler->notify((cas.mapped_addr.rank * bg_num + cas.mapped_addr.bg) * bank_per_bg + cas.mapped_addr.bank);
             DFI_TYPE type = cas.is_read ? DFI_TYPE::READ : DFI_TYPE::WRITE;
             if (has_act) {
                 phase1.assign(type, cas);
@@ -359,13 +441,9 @@ void SdramCommandGen::step()
                 phase0.assign(type, cas);
             }
             if (cas.is_read) {
-                if (cas.is_to_cache) {
-                    cache->returnFromScg(cas);
-                } else {
-                    axi2ui->put_back(cas.id, cas.token, CallerType::SCG);
-                    log->out_filter(cas);   // we merge read back path "scg,scheduler,addrmap,filter"
-                }
+                enqueue_read_data_return(cas);
             }
+            ++cas_cnt;
         }
     }
 
@@ -383,6 +461,7 @@ void SdramCommandGen::step()
             } else {
                 phase0.assign(DFI_TYPE::PRE, pre);
             }
+            ++pre_cnt;
         }
     }
 
@@ -458,4 +537,17 @@ void SdramCommandGen::step()
     last_has_act = has_act;
     last_has_cas = has_cas;
     last_has_pre = has_pre;
+}
+
+bool SdramCommandGen::all_done() const
+{
+    if (!readback_queue.empty()) {
+        return false;
+    }
+
+    // all RequestGenerator are done
+    for (auto &gen: req_gen) {
+        if (!gen.transQ.empty()) return false;
+    }
+    return true;
 }

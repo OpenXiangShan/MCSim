@@ -32,9 +32,11 @@ private:
         AXI_IN,
         FILTER_IN,
         ADDRMAP_IN,
+        CACHE_IN,
         SCHEDULER_IN,
         SCG_IN,
-        FILTER_OUT,   // data back to rob
+        CACHE_REFILL,
+        ROB_IN,   // data becomes visible to AXI2UI/ROB
         AXI_OUT   // data out axi
     };
     std::string logDir;
@@ -48,9 +50,11 @@ public:
     void in_axi(const AxiTransaction &rat);   // write cycles to Log when axi get in a rcmd
     void in_filter(const AxiTransaction &rat);   // write cycles to Log when filter get in a rcmd
     void in_addrmap(const FilterTransaction &rft);   // write cycles to Log when addrmap get in a rcmd
+    void in_cache(const MappedTransaction &rmt);   // write cycles to Log when cache accepts a rcmd
     void in_scheduler(const MappedTransaction &rmt);   // write cycles to Log when scheduler get in a rcmd
     void in_scg(const MappedTransaction &rmt);   // write cycles to Log when scg get in a rcmd
-    void out_filter(const MappedTransaction &rmt);   // write cycles to Log when scg/scheduler/addrmap/filter get out a rcmd
+    void in_cache_refill(const MappedTransaction &rmt);   // write cycles to Log when cache receives read data from SCG
+    void rob_in_at(ID_TYPE id, TOKEN_TYPE token, CallerType source, TIME_TYPE cycle);   // write cycle when data is visible in ROB
     void out_axi(ID_TYPE id, TOKEN_TYPE token);   // write cycles to Log when axi get out a rcmd
 };
 
